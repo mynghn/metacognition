@@ -7,26 +7,29 @@ by a thin per-sibling config. Re-derived from the three near-duplicate `*-kb` sc
 in a single source (SPEC#INV-2) and an operation change takes effect family-wide with no
 per-sibling copy to edit (SPEC#O-3). DESIGN#Decision-3.
 
-Scope — feature 0004, task E1: validation + entry write + slug-sorted INDEX upsert +
-remove + locate, against an explicitly-supplied vault folder. This engine deliberately
-does NOT commit and resolves no location: pointing the write+commit at the vault repo's
-own history, resolving the vault from installer-recorded config, and dropping the legacy
-`chezmoi apply` path are task E2 (DESIGN#Decision-4). Keeping the mutation here and the
-commit in E2 leaves one clean validate->write->commit seam (SPEC#INV-4).
+Scope — feature 0004, tasks E1 + E2: validate + write the entry + upsert the slug-sorted
+INDEX + remove + locate against a vault folder (E1), then record each change as exactly one
+commit in the vault repo's own history, resolving the vault location from env / installer
+config / a standard default (E2, DESIGN#Decision-4). There is NO chezmoi path — the legacy
+source-write -> `chezmoi apply` -> commit-into-dotfiles is gone; every mutation is one
+validated channel straight to the vault repo (SPEC#O-2, INV-1, INV-4). Validation, write, and
+commit all live here, so nothing bypasses them.
 
 Operation semantics are preserved exactly from the `*-kb` scripts:
   - frontmatter: `name` == slug, non-empty `description`, `last_refreshed` present, `sources` present
   - INDEX upsert sorted by slug under the configured `## <index_heading>` section
   - capture refuses an existing slug; refresh refuses an absent one
   - kebab-case slug only
+  - one commit per change (now to the vault repo, not the dotfiles repo)
 
 A per-sibling config is a flat `key = value` file (see templates/sibling-config.schema.md).
-The engine consumes `stem` (the vault topic folder) and `index_heading`; `env_prefix` and
-`tier` are reserved for E2 (location override) and D2 (discovery wiring) respectively.
+The engine consumes `stem` (the vault topic folder), `index_heading`, and `env_prefix`
+(vault-location override); `tier` is reserved for D2 (discovery wiring).
 """
 import argparse
 import os
 import re
+import subprocess
 import sys
 
 PROG = "kb-engine"
@@ -54,6 +57,9 @@ def load_config(path):
     for required in ("stem", "index_heading"):
         if not cfg.get(required):
             die("config missing required field %r (%s)" % (required, path))
+    stem = cfg["stem"]
+    if stem in (".", "..") or stem != os.path.basename(stem):
+        die("config: 'stem' must be a single path component (no '/', '..', or absolute), got %r" % stem)
     return cfg
 
 
@@ -64,6 +70,117 @@ def valid_slug(slug):
 
 def topic_dir(vault, cfg):
     return os.path.join(vault, cfg["stem"])
+
+
+DEFAULT_VAULT = "~/.local/share/llm-agent-knowledge-vault"
+
+
+def resolve_vault(explicit, cfg):
+    """Resolve the vault repo location (DESIGN#Decision-4), in precedence order:
+    explicit `--vault`; a per-sibling `<PREFIX>_KB_VAULT` env override; the family-level
+    `KB_VAULT` env; the installer-recorded config file; then a standard default. The vault
+    is ONE repo holding every topic, so `KB_VAULT` is the family override and
+    `<PREFIX>_KB_VAULT` is the per-sibling hook (the Decision-1 invalidation trigger:
+    a sibling that ever needs its own vault). The config file is written by the installer
+    (task D3); its path is the engine<->installer contract.
+    """
+    chosen = _clean_path(explicit)
+    if chosen:
+        return chosen
+    prefix = cfg.get("env_prefix")
+    if prefix:
+        chosen = _clean_path(os.environ.get(prefix + "_KB_VAULT"))
+        if chosen:
+            return chosen
+    chosen = _clean_path(os.environ.get("KB_VAULT"))
+    if chosen:
+        return chosen
+    conf = os.path.join(
+        os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
+        "llm-agent-knowledge-base", "vault",
+    )
+    if os.path.isfile(conf):
+        chosen = _clean_path(open(conf, encoding="utf-8").read())
+        if chosen:
+            return chosen
+    return _clean_path(DEFAULT_VAULT)
+
+
+def _clean_path(value):
+    """Normalize a vault-location source: strip, expanduser, and absolutize (cwd-independent).
+    Blank/whitespace-only -> None so resolution falls through to the next source uniformly."""
+    if not value or not value.strip():
+        return None
+    return os.path.abspath(os.path.expanduser(value.strip()))
+
+
+def _require_git_repo(vault):
+    """The vault must be a git repo ROOT — mutation records to its OWN history. Checked
+    before any write so a missing / non-repo / nested-inside-another-repo vault fails before
+    the working tree is touched. The root check is load-bearing for SPEC#INV-1: a vault dir
+    nested inside an outer repo (e.g. an uninitialized vault under a git-tracked $HOME) must
+    NOT let a change commit into that outer/dotfiles repo — the exact leak the rehome kills."""
+    if not os.path.isdir(vault):
+        die("vault not found: %s (run the installer, or pass --vault)" % vault)
+    try:
+        top = subprocess.run(
+            ["git", "-C", vault, "rev-parse", "--show-toplevel"], capture_output=True, text=True,
+        )
+    except FileNotFoundError:
+        die("git not found on PATH — install git or fix PATH")
+    if top.returncode != 0:
+        die("vault is not a git repo: %s (run the installer to set up the vault)" % vault)
+    root = top.stdout.strip()
+    if os.path.realpath(root) != os.path.realpath(vault):
+        die("vault %s is not a git repo root — it sits inside %s; run the installer to init "
+            "the vault (refusing to commit into the enclosing repo)" % (vault, root))
+
+
+def _rollback(vault, rels):
+    """After a failed commit, restore the op-paths to HEAD: unstage, then restore each from
+    HEAD (an existing entry / the INDEX) or delete it (a brand-new capture not yet in HEAD),
+    so a failed mutation leaves no orphan entry or stale INDEX line behind."""
+    subprocess.run(["git", "-C", vault, "reset", "-q", "--"] + rels, capture_output=True)
+    for rel in rels:
+        in_head = subprocess.run(
+            ["git", "-C", vault, "cat-file", "-e", "HEAD:" + rel], capture_output=True,
+        ).returncode == 0
+        if in_head:
+            subprocess.run(["git", "-C", vault, "checkout", "HEAD", "--", rel], capture_output=True)
+        else:
+            try:
+                os.remove(os.path.join(vault, rel))
+            except OSError:
+                pass
+
+
+def commit_change(vault, cfg, slug, verb):
+    """Stage the entry + INDEX and record exactly one commit in the vault repo's history,
+    scoped to those two paths. The mutation and its commit are one engine step (SPEC#INV-4):
+    on any git failure the working tree is rolled back to HEAD, so a half-written change can
+    never persist, and git errors surface as a clean message rather than a Python traceback."""
+    rels = [
+        os.path.join(cfg["stem"], "knowledge", slug + ".md"),
+        os.path.join(cfg["stem"], "INDEX.md"),
+    ]
+    try:
+        subprocess.run(["git", "-C", vault, "add", "--"] + rels, check=True, capture_output=True, text=True)
+        # Scope the change-check AND the commit to exactly these two paths (`-- rels`), so the
+        # op's commit can never sweep in an unrelated already-staged change in the vault.
+        if subprocess.run(["git", "-C", vault, "diff", "--cached", "--quiet", "--"] + rels).returncode == 0:
+            die("nothing changed for %r — no commit made" % slug)
+        subprocess.run(
+            ["git", "-C", vault, "commit", "-q", "-m", "%s: %s %s" % (cfg["stem"], verb, slug), "--"] + rels,
+            check=True, capture_output=True, text=True,
+        )
+    except FileNotFoundError:
+        die("git not found on PATH — install git or fix PATH")
+    except subprocess.CalledProcessError as exc:
+        _rollback(vault, rels)
+        die("git failed (change rolled back): %s" % ((exc.stderr or "").strip() or exc))
+    return subprocess.run(
+        ["git", "-C", vault, "rev-parse", "--short", "HEAD"], capture_output=True, text=True,
+    ).stdout.strip()
 
 
 def _frontmatter_fields(body):
@@ -136,6 +253,7 @@ def _upsert_index(idx, lines, h, slug, desc):
 
 def write_entry(verb, vault, cfg, slug):
     valid_slug(slug)
+    _require_git_repo(vault)
     tdir = topic_dir(vault, cfg)
     entry = os.path.join(tdir, "knowledge", slug + ".md")
     if verb == "capture":
@@ -164,11 +282,13 @@ def write_entry(verb, vault, cfg, slug):
     with open(entry, "w", encoding="utf-8") as fh:
         fh.write(body)
     _upsert_index(idx, lines, h, slug, desc)
-    sys.stdout.write("%s: %sd %s\n" % (PROG, verb, slug))
+    sha = commit_change(vault, cfg, slug, verb)
+    sys.stdout.write("%s: %sd %s (%s)\n" % (PROG, verb, slug, sha))
 
 
 def remove_entry(vault, cfg, slug):
     valid_slug(slug)
+    _require_git_repo(vault)
     tdir = topic_dir(vault, cfg)
     entry = os.path.join(tdir, "knowledge", slug + ".md")
     if not os.path.exists(entry):
@@ -179,11 +299,13 @@ def remove_entry(vault, cfg, slug):
     os.remove(entry)
     with open(idx, "w", encoding="utf-8") as fh:
         fh.write("\n".join(l for l in lines if not pat.match(l)))
-    sys.stdout.write("%s: removed %s\n" % (PROG, slug))
+    sha = commit_change(vault, cfg, slug, "remove")
+    sys.stdout.write("%s: removed %s (%s)\n" % (PROG, slug, sha))
 
 
 def locate(vault, cfg, slug):
     tdir = topic_dir(vault, cfg)
+    sys.stdout.write("vault: %s\n" % vault)
     sys.stdout.write("topic: %s\n" % tdir)
     sys.stdout.write("index: %s\n" % os.path.join(tdir, "INDEX.md"))
     if slug:
@@ -194,7 +316,8 @@ def locate(vault, cfg, slug):
 def main(argv=None):
     p = argparse.ArgumentParser(prog=PROG, description="Shared KB operations engine.")
     p.add_argument("--config", required=True, help="per-sibling config file (key = value)")
-    p.add_argument("--vault", required=True, help="vault root holding the per-topic folders")
+    p.add_argument("--vault", help="vault repo root (default: resolved per DESIGN Decision-4 — "
+                                   "$<PREFIX>_KB_VAULT / $KB_VAULT / installer config / %s)" % DEFAULT_VAULT)
     sub = p.add_subparsers(dest="op", required=True)
     for op in ("capture", "refresh"):
         s = sub.add_parser(op, help="%s an entry (markdown on stdin)" % op)
@@ -206,12 +329,13 @@ def main(argv=None):
     args = p.parse_args(argv)
 
     cfg = load_config(args.config)
+    vault = resolve_vault(args.vault, cfg)
     if args.op in ("capture", "refresh"):
-        write_entry(args.op, args.vault, cfg, args.slug)
+        write_entry(args.op, vault, cfg, args.slug)
     elif args.op == "remove":
-        remove_entry(args.vault, cfg, args.slug)
+        remove_entry(vault, cfg, args.slug)
     elif args.op == "locate":
-        locate(args.vault, cfg, args.slug)
+        locate(vault, cfg, args.slug)
 
 
 if __name__ == "__main__":

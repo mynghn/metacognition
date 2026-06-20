@@ -8,10 +8,10 @@ Flat `key = value`, one per line; `#` starts a comment. Deliberately not a templ
 |---|---|---|---|
 | `stem` | engine | the topic's vault folder name (`<vault>/<stem>/`) and the sibling's identity | `context-engineering` |
 | `index_heading` | engine | the `## <heading>` section in the topic's `INDEX.md` that entries are upserted under | `Concepts` |
-| `env_prefix` | E2 (location override) | prefix for the env var that overrides the vault location (e.g. `<PREFIX>_KB_VAULT`) | `CE` |
+| `env_prefix` | engine (location override) | prefix for the per-sibling env var that overrides the vault location: `<PREFIX>_KB_VAULT` | `CE` |
 | `tier` | D2 (discovery wiring) | `everyday` \| `common` \| `situational` — gates the tier-gated `AGENTS.md` block (Decision-5) | `everyday` |
 
-The engine (task E1) reads `stem` + `index_heading`; `env_prefix` and `tier` are reserved for E2 and D2 and ignored by the engine today.
+The engine reads `stem`, `index_heading`, and `env_prefix` (vault-location override, checked before the family-level `$KB_VAULT`); `tier` is reserved for D2 and ignored by the engine.
 
 ## Example
 

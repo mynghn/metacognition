@@ -1,16 +1,23 @@
 #!/usr/bin/env python3
-"""selftest — behavioral-parity tests for kb-engine (feature 0004, task E1).
+"""selftest — behavioral tests for kb-engine (feature 0004, tasks E1 + E2).
 
-Each test encodes a behavior the engine must preserve from the legacy `*-kb` scripts,
-so this file is the durable home for E1's parity WHYs (run it after any engine change):
-  - valid capture writes the entry and inserts a slug-sorted INDEX line (keeping the
-    section's pre-entry boilerplate);
+Each test encodes a behavior the engine must preserve, so this file is the durable home
+for the engine's WHYs (run it after any engine change):
+
+E1 parity (vs the legacy `*-kb` scripts):
+  - valid capture writes the entry + a slug-sorted INDEX line (keeping section boilerplate);
   - INDEX stays slug-sorted across out-of-order captures;
   - capture refuses an existing slug; refresh refuses an absent one; refresh overwrites;
-  - every frontmatter rule rejects (no frontmatter / name!=slug / empty description /
-    missing last_refreshed / missing sources) AND leaves nothing written (atomicity);
-  - a missing INDEX heading rejects with no orphan entry (the E1 atomicity fix);
-  - remove drops the entry file and its INDEX line; invalid slug rejects; locate resolves.
+  - every frontmatter rule rejects AND writes nothing (atomicity);
+  - a missing INDEX heading rejects with no orphan entry; invalid slug rejects;
+  - CRLF input is accepted and normalized (legacy file-round-trip parity);
+  - remove drops the entry file and its INDEX line.
+
+E2 (mutation -> vault repo):
+  - every capture / refresh / remove records EXACTLY ONE commit in the vault repo;
+  - a rejected op records NO commit and leaves the tree unchanged;
+  - the vault location resolves from $<PREFIX>_KB_VAULT / $KB_VAULT / default when --vault is omitted;
+  - a non-git vault is refused.
 """
 import os
 import shutil
@@ -19,6 +26,7 @@ import sys
 import tempfile
 
 ENGINE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kb-engine")
+DEFAULT_VAULT = os.path.expanduser("~/.local/share/llm-agent-knowledge-vault")
 
 VALID_ENTRY = """---
 name: {slug}
@@ -50,7 +58,15 @@ def check(name, ok, detail=""):
     print("  %s %s%s" % ("PASS" if ok else "FAIL", name, ("  — " + detail) if detail and not ok else ""))
 
 
-def make_vault(heading="## Concepts"):
+def git(vault, *args):
+    return subprocess.run(["git", "-C", vault, *args], capture_output=True, text=True)
+
+
+def ncommits(vault):
+    return int(git(vault, "rev-list", "--count", "HEAD").stdout or "0")
+
+
+def make_vault(heading="## Concepts", init_git=True):
     vault = tempfile.mkdtemp(prefix="kb-selftest-")
     tdir = os.path.join(vault, "test-topic")
     os.makedirs(os.path.join(tdir, "knowledge"))
@@ -59,14 +75,20 @@ def make_vault(heading="## Concepts"):
     cfg = os.path.join(vault, "config")
     with open(cfg, "w", encoding="utf-8") as fh:
         fh.write("stem = test-topic\nindex_heading = Concepts\nenv_prefix = CE\ntier = everyday\n")
+    if init_git:
+        git(vault, "init", "-q")
+        git(vault, "config", "user.name", "selftest")
+        git(vault, "config", "user.email", "selftest@example.com")
+        git(vault, "add", "-A")
+        git(vault, "commit", "-q", "-m", "init")
     return vault, tdir, cfg
 
 
-def run(cfg, vault, args, stdin=None):
-    return subprocess.run(
-        [sys.executable, ENGINE, "--config", cfg, "--vault", vault] + args,
-        input=stdin, capture_output=True, text=True,
-    )
+def run(cfg, vault, args, stdin=None, env=None):
+    cmd = [sys.executable, ENGINE, "--config", cfg]
+    if vault is not None:
+        cmd += ["--vault", vault]
+    return subprocess.run(cmd + args, input=stdin, capture_output=True, text=True, env=env)
 
 
 def index_lines(tdir):
@@ -81,46 +103,52 @@ def entry_slugs(tdir):
 def main():
     vault, tdir, cfg = make_vault()
     try:
-        # valid capture writes entry + INDEX line, preserving the boilerplate comment
+        base = ncommits(vault)
+
+        # valid capture: writes entry + INDEX line, keeps boilerplate, ONE commit
         r = run(cfg, vault, ["capture", "beta"], VALID_ENTRY.format(slug="beta"))
         check("capture exits 0", r.returncode == 0, r.stderr)
         check("capture writes entry file", os.path.isfile(os.path.join(tdir, "knowledge", "beta.md")))
         check("capture inserts INDEX line", "beta" in entry_slugs(tdir))
-        check("INDEX keeps boilerplate comment",
-              any("one line per concept" in l for l in index_lines(tdir)))
+        check("INDEX keeps boilerplate comment", any("one line per concept" in l for l in index_lines(tdir)))
+        check("capture records exactly one commit", ncommits(vault) == base + 1, str(ncommits(vault) - base))
+        check("commit message names topic + op", git(vault, "log", "-1", "--format=%s").stdout.strip()
+              == "test-topic: capture beta")
 
-        # out-of-order captures stay slug-sorted
+        # out-of-order captures stay slug-sorted; each is one commit
         run(cfg, vault, ["capture", "alpha"], VALID_ENTRY.format(slug="alpha"))
         run(cfg, vault, ["capture", "gamma"], VALID_ENTRY.format(slug="gamma"))
-        check("INDEX slug-sorted", entry_slugs(tdir) == ["alpha", "beta", "gamma"],
-              str(entry_slugs(tdir)))
+        check("INDEX slug-sorted", entry_slugs(tdir) == ["alpha", "beta", "gamma"], str(entry_slugs(tdir)))
+        check("three captures -> three commits", ncommits(vault) == base + 3, str(ncommits(vault) - base))
 
-        # capture refuses an existing slug; nothing changes
+        # capture refuses an existing slug: no change, NO commit
+        n = ncommits(vault)
         before = open(os.path.join(tdir, "INDEX.md"), encoding="utf-8").read()
         r = run(cfg, vault, ["capture", "beta"], VALID_ENTRY.format(slug="beta"))
         check("capture refuses existing slug", r.returncode != 0, r.stderr)
-        check("refused capture leaves INDEX unchanged",
+        check("refused capture: INDEX unchanged",
               open(os.path.join(tdir, "INDEX.md"), encoding="utf-8").read() == before)
+        check("refused capture: no commit", ncommits(vault) == n)
 
-        # refresh refuses an absent slug; overwrites an existing one
+        # refresh refuses absent; overwrites existing (one commit)
         r = run(cfg, vault, ["refresh", "nope"], VALID_ENTRY.format(slug="nope"))
         check("refresh refuses absent slug", r.returncode != 0, r.stderr)
-        r = run(cfg, vault, ["refresh", "beta"], VALID_ENTRY.format(slug="beta").replace(
-            "one-line retrieval trigger for beta", "REFRESHED trigger"))
+        n = ncommits(vault)
+        r = run(cfg, vault, ["refresh", "beta"],
+                VALID_ENTRY.format(slug="beta").replace("one-line retrieval trigger for beta", "REFRESHED trigger"))
         check("refresh exits 0", r.returncode == 0, r.stderr)
-        check("refresh updates INDEX description",
-              any("REFRESHED trigger" in l for l in index_lines(tdir)))
+        check("refresh updates INDEX description", any("REFRESHED trigger" in l for l in index_lines(tdir)))
+        check("refresh records one commit", ncommits(vault) == n + 1)
 
-        # every frontmatter rule rejects AND writes nothing (atomicity)
+        # every frontmatter rule rejects AND writes nothing AND makes no commit (atomicity)
+        n = ncommits(vault)
         bad = {
             "no-frontmatter": "no frontmatter here\n",
-            "name-mismatch": VALID_ENTRY.format(slug="different-name").replace(
-                "name: different-name", "name: wrong"),
+            "name-mismatch": VALID_ENTRY.format(slug="different-name").replace("name: different-name", "name: wrong"),
             "empty-description": VALID_ENTRY.format(slug="bad-desc").replace(
                 "description: one-line retrieval trigger for bad-desc", "description:"),
             "missing-last-refreshed": "\n".join(
-                l for l in VALID_ENTRY.format(slug="no-date").split("\n")
-                if not l.startswith("last_refreshed:")) + "\n",
+                l for l in VALID_ENTRY.format(slug="no-date").split("\n") if not l.startswith("last_refreshed:")) + "\n",
             "missing-sources": "\n".join(
                 l for l in VALID_ENTRY.format(slug="no-src").split("\n")
                 if not l.startswith("sources:") and not l.strip().startswith("- Author")) + "\n",
@@ -130,41 +158,150 @@ def main():
             wrote = os.path.isfile(os.path.join(tdir, "knowledge", slug + ".md"))
             check("reject bad frontmatter: %s" % slug, r.returncode != 0 and not wrote,
                   "rc=%s wrote=%s" % (r.returncode, wrote))
+        check("rejected captures made no commits", ncommits(vault) == n)
 
         # invalid slug rejects
         r = run(cfg, vault, ["capture", "Bad_Slug"], VALID_ENTRY.format(slug="Bad_Slug"))
         check("reject invalid slug", r.returncode != 0)
 
-        # CRLF input is accepted and normalized to LF (parity with the legacy file round-trip)
-        r = run(cfg, vault, ["capture", "crlf-entry"],
-                VALID_ENTRY.format(slug="crlf-entry").replace("\n", "\r\n"))
+        # CRLF input accepted + normalized to LF (legacy round-trip parity)
+        r = run(cfg, vault, ["capture", "crlf-entry"], VALID_ENTRY.format(slug="crlf-entry").replace("\n", "\r\n"))
         check("CRLF entry accepted", r.returncode == 0, r.stderr)
         crlf_path = os.path.join(tdir, "knowledge", "crlf-entry.md")
         check("CRLF entry normalized to LF",
               os.path.isfile(crlf_path) and "\r" not in open(crlf_path, encoding="utf-8", newline="").read())
 
-        # remove drops the entry file and its INDEX line
+        # remove drops entry file + INDEX line, one commit
+        n = ncommits(vault)
         r = run(cfg, vault, ["remove", "beta"])
         check("remove exits 0", r.returncode == 0, r.stderr)
         check("remove drops entry file", not os.path.exists(os.path.join(tdir, "knowledge", "beta.md")))
         check("remove drops INDEX line", "beta" not in entry_slugs(tdir))
+        check("remove records one commit", ncommits(vault) == n + 1)
         r = run(cfg, vault, ["remove", "ghost"])
         check("remove refuses absent slug", r.returncode != 0)
 
-        # locate resolves paths
+        # locate resolves paths (incl. the vault)
         r = run(cfg, vault, ["locate", "alpha"])
         check("locate exits 0", r.returncode == 0, r.stderr)
-        check("locate prints entry path", "alpha.md" in r.stdout)
+        check("locate prints vault + entry", vault in r.stdout and "alpha.md" in r.stdout)
 
-        # missing INDEX heading rejects WITH NO orphan entry (the atomicity fix)
-        v2, t2, c2 = make_vault(heading="## Other")
+        # vault-location resolution when --vault is omitted (E2 / Decision-4)
+        clean = {k: v for k, v in os.environ.items() if k not in ("KB_VAULT", "CE_KB_VAULT")}
+        r = run(cfg, None, ["locate"], env=dict(clean, KB_VAULT=vault))
+        check("resolves $KB_VAULT", r.returncode == 0 and vault in r.stdout, r.stderr + r.stdout)
+        r = run(cfg, None, ["locate"], env=dict(clean, CE_KB_VAULT=vault))
+        check("resolves $<PREFIX>_KB_VAULT", r.returncode == 0 and vault in r.stdout, r.stderr + r.stdout)
+        r = run(cfg, None, ["locate"], env=clean)
+        check("falls back to default vault", DEFAULT_VAULT in r.stdout, r.stdout)
+
+        # the op's commit is scoped: an unrelated already-staged vault change is NOT swept in
+        with open(os.path.join(vault, "unrelated.txt"), "w", encoding="utf-8") as fh:
+            fh.write("staged but unrelated\n")
+        git(vault, "add", "unrelated.txt")
+        run(cfg, vault, ["capture", "scoped"], VALID_ENTRY.format(slug="scoped"))
+        committed = git(vault, "show", "--name-only", "--format=", "HEAD").stdout.split()
+        check("commit excludes unrelated staged file", "unrelated.txt" not in committed, str(committed))
+        check("unrelated file still staged (uncommitted)",
+              "unrelated.txt" in git(vault, "diff", "--cached", "--name-only").stdout)
+
+        # a non-git vault is refused (mutation needs a repo to record into)
+        v2, t2, c2 = make_vault(init_git=False)
         try:
-            r = run(c2, v2, ["capture", "orphan"], VALID_ENTRY.format(slug="orphan"))
-            wrote = os.path.isfile(os.path.join(t2, "knowledge", "orphan.md"))
+            r = run(c2, v2, ["capture", "x"], VALID_ENTRY.format(slug="x"))
+            check("non-git vault refused", r.returncode != 0 and "git repo" in r.stderr, r.stderr)
+        finally:
+            shutil.rmtree(v2, ignore_errors=True)
+
+        # SPEC#INV-1 guard: a vault dir NESTED inside an outer repo must be refused — never
+        # commit the change into the enclosing (e.g. dotfiles) repo.
+        outer = tempfile.mkdtemp(prefix="kb-outer-")
+        try:
+            for a in (["init", "-q"], ["config", "user.name", "o"], ["config", "user.email", "o@e"]):
+                git(outer, *a)
+            open(os.path.join(outer, "seed.txt"), "w").write("x")
+            git(outer, "add", "-A")
+            git(outer, "commit", "-q", "-m", "seed")
+            nested = os.path.join(outer, "subvault")
+            os.makedirs(os.path.join(nested, "test-topic", "knowledge"))
+            with open(os.path.join(nested, "test-topic", "INDEX.md"), "w") as fh:
+                fh.write(INDEX_SKELETON)
+            ncfg = os.path.join(outer, "cfg")
+            with open(ncfg, "w") as fh:
+                fh.write("stem = test-topic\nindex_heading = Concepts\n")
+            n_outer = ncommits(outer)
+            r = run(ncfg, nested, ["capture", "leak"], VALID_ENTRY.format(slug="leak"))
+            check("nested-non-repo vault refused", r.returncode != 0 and "repo root" in r.stderr, r.stderr)
+            check("outer repo got NO commit (no INV-1 leak)", ncommits(outer) == n_outer)
+            check("nested capture wrote no entry",
+                  not os.path.isfile(os.path.join(nested, "test-topic", "knowledge", "leak.md")))
+        finally:
+            shutil.rmtree(outer, ignore_errors=True)
+
+        # commit failure (a failing pre-commit hook) rolls back atomically: clean error,
+        # no orphan entry, no commit, clean index, INDEX restored
+        v4, t4, c4 = make_vault()
+        try:
+            hook = os.path.join(v4, ".git", "hooks", "pre-commit")
+            with open(hook, "w") as fh:
+                fh.write("#!/bin/sh\nexit 1\n")
+            os.chmod(hook, 0o755)
+            n4 = ncommits(v4)
+            r = run(c4, v4, ["capture", "hookfail"], VALID_ENTRY.format(slug="hookfail"))
+            check("commit failure: clean error (no traceback)",
+                  r.returncode != 0 and "Traceback" not in r.stderr and "rolled back" in r.stderr, r.stderr)
+            check("commit failure: no orphan entry", not os.path.isfile(os.path.join(t4, "knowledge", "hookfail.md")))
+            check("commit failure: no commit", ncommits(v4) == n4)
+            check("commit failure: clean index", git(v4, "diff", "--cached", "--name-only").stdout.strip() == "")
+            check("commit failure: INDEX restored",
+                  "hookfail" not in open(os.path.join(t4, "INDEX.md"), encoding="utf-8").read())
+        finally:
+            shutil.rmtree(v4, ignore_errors=True)
+
+        # absent git binary -> clean error, no orphan
+        v5, t5, c5 = make_vault()
+        try:
+            r = run(c5, v5, ["capture", "nogit"], VALID_ENTRY.format(slug="nogit"),
+                    env=dict(os.environ, PATH="/nonexistent"))
+            check("git absent: clean error (no traceback)",
+                  r.returncode != 0 and "git not found" in r.stderr and "Traceback" not in r.stderr, r.stderr)
+            check("git absent: no orphan entry", not os.path.isfile(os.path.join(t5, "knowledge", "nogit.md")))
+        finally:
+            shutil.rmtree(v5, ignore_errors=True)
+
+        # config stem with traversal is rejected at load, before any write (defense-in-depth)
+        v6, t6, _ = make_vault()
+        try:
+            badcfg = os.path.join(v6, "badcfg")
+            with open(badcfg, "w") as fh:
+                fh.write("stem = ../escape\nindex_heading = Concepts\n")
+            r = run(badcfg, v6, ["capture", "x"], VALID_ENTRY.format(slug="x"))
+            check("traversal stem rejected", r.returncode != 0 and "single path component" in r.stderr, r.stderr)
+            check("traversal wrote nothing outside vault",
+                  not os.path.exists(os.path.join(os.path.dirname(v6), "escape")))
+        finally:
+            shutil.rmtree(v6, ignore_errors=True)
+
+        # env-var whitespace: whitespace-only falls through to default; space-wrapped resolves trimmed
+        clean2 = {k: v for k, v in os.environ.items() if k not in ("KB_VAULT", "CE_KB_VAULT")}
+        r = run(cfg, None, ["locate"], env=dict(clean2, KB_VAULT="   "))
+        check("whitespace-only $KB_VAULT falls through to default", DEFAULT_VAULT in r.stdout, r.stdout)
+        r = run(cfg, None, ["locate"], env=dict(clean2, KB_VAULT="  " + vault + "  "))
+        check("space-wrapped $KB_VAULT resolves trimmed", vault in r.stdout, r.stdout)
+
+        # absent vault: the error names the vault, not the INDEX
+        r = run(cfg, "/nonexistent/vault/path", ["capture", "x"], VALID_ENTRY.format(slug="x"))
+        check("absent vault: error names the vault", r.returncode != 0 and "vault not found" in r.stderr, r.stderr)
+
+        # missing INDEX heading rejects WITH NO orphan entry (atomicity fix)
+        v3, t3, c3 = make_vault(heading="## Other")
+        try:
+            r = run(c3, v3, ["capture", "orphan"], VALID_ENTRY.format(slug="orphan"))
+            wrote = os.path.isfile(os.path.join(t3, "knowledge", "orphan.md"))
             check("missing heading rejects with no orphan", r.returncode != 0 and not wrote,
                   "rc=%s wrote=%s" % (r.returncode, wrote))
         finally:
-            shutil.rmtree(v2, ignore_errors=True)
+            shutil.rmtree(v3, ignore_errors=True)
     finally:
         shutil.rmtree(vault, ignore_errors=True)
 
