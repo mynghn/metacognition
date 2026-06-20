@@ -7,4 +7,4 @@ The **discovery-wiring source** — one source per sibling, from which the insta
 
 Common / Situational siblings get description-only discovery — they cost nothing in an agent turn until the work matches. `tier` comes from the per-sibling [`config/`](../config). This consolidates today's hand-maintained, 6×-duplicated wiring.
 
-DESIGN Decision-5 (discovery-wiring-emitted-tier-gated). Populated by feature `0004`, task D2.
+DESIGN Decision-5 (discovery-wiring-emitted-tier-gated). The per-sibling `description` files are added in D1 (the installer renders them into both adapters' frontmatter); D2 adds the tier-gated `AGENTS.md` block emission (Everyday-tier only), reading `tier` from [`../config/`](../config).

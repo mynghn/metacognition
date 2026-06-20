@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+"""install-selftest — robustness + idempotency tests for the installer (feature 0004, D1).
+
+Encodes the adversarial findings so they cannot regress: byte-identical Claude/Codex adapters,
+idempotent re-run, stray/dotfiles in config/ skipped (not mis-treated as siblings), and CLEAN
+errors (no Python tracebacks) for an unknown --only / a config missing a required field / a
+sibling with no discovery description.
+"""
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+
+ROOT = os.path.dirname(os.path.abspath(__file__))
+INSTALL = os.path.join(ROOT, "install")
+CONFIG = os.path.join(ROOT, "config")
+NAMES = ["context-engineering-knowledge-base", "prompt-engineering-knowledge-base", "tool-design-knowledge-base"]
+_ok = []
+
+
+def check(name, cond, detail=""):
+    _ok.append(bool(cond))
+    print("  %s %s%s" % ("PASS" if cond else "FAIL", name, ("  — " + detail) if detail and not cond else ""))
+
+
+def run(args):
+    return subprocess.run([sys.executable, INSTALL] + args, capture_output=True, text=True)
+
+
+def read(dest, provider, name):
+    return open(os.path.join(dest, provider, "skills", name, "SKILL.md"), encoding="utf-8").read()
+
+
+def main():
+    dest = tempfile.mkdtemp(prefix="kb-install-")
+    try:
+        r = run(["--dest", dest])
+        check("install exits 0", r.returncode == 0, r.stderr)
+        for n in NAMES:
+            c = os.path.join(dest, ".claude", "skills", n, "SKILL.md")
+            x = os.path.join(dest, ".codex", "skills", n, "SKILL.md")
+            check("%s: Claude == Codex" % n,
+                  os.path.isfile(c) and os.path.isfile(x) and read(dest, ".claude", n) == read(dest, ".codex", n))
+
+        snap = {n: read(dest, ".claude", n) for n in NAMES}
+        run(["--dest", dest])
+        check("idempotent re-run", all(read(dest, ".claude", n) == snap[n] for n in NAMES))
+
+        d2 = tempfile.mkdtemp(prefix="kb-install-")
+        try:
+            r = run(["--dest", d2, "--only", "context-engineering-knowledge-base"])
+            check("--only accepts full skill name",
+                  r.returncode == 0 and os.path.isfile(os.path.join(d2, ".claude", "skills", NAMES[0], "SKILL.md")), r.stderr)
+        finally:
+            shutil.rmtree(d2, ignore_errors=True)
+
+        r = run(["--dest", dest, "--only", "nonsuch"])
+        check("unknown --only: clean error", r.returncode != 0 and "unknown sibling" in r.stderr and "Traceback" not in r.stderr, r.stderr)
+
+        # stray dotfile in config/ must be skipped, not aborted on
+        ds = os.path.join(CONFIG, ".DS_Store")
+        open(ds, "w").write("junk")
+        try:
+            d3 = tempfile.mkdtemp(prefix="kb-install-")
+            try:
+                r = run(["--dest", d3])
+                installed = sorted(os.listdir(os.path.join(d3, ".claude", "skills"))) if os.path.isdir(os.path.join(d3, ".claude", "skills")) else []
+                check("stray .DS_Store skipped", r.returncode == 0 and installed == sorted(NAMES), "%s / %s" % (r.stderr.strip(), installed))
+            finally:
+                shutil.rmtree(d3, ignore_errors=True)
+        finally:
+            os.remove(ds)
+
+        # config missing a required field -> clean error
+        bad = os.path.join(CONFIG, "_selftest_bad")
+        open(bad, "w").write("index_heading = X\n")  # no stem
+        try:
+            r = run(["--dest", dest, "--only", "_selftest_bad"])
+            check("missing config field: clean error",
+                  r.returncode != 0 and "missing required field" in r.stderr and "Traceback" not in r.stderr, r.stderr)
+        finally:
+            os.remove(bad)
+
+        # config present but no wiring description -> clean error
+        nw = os.path.join(CONFIG, "_selftest_nowire")
+        open(nw, "w").write("stem = _selftest_nowire\nindex_heading = X\n")
+        try:
+            r = run(["--dest", dest, "--only", "_selftest_nowire"])
+            check("missing description: clean error",
+                  r.returncode != 0 and "discovery description" in r.stderr and "Traceback" not in r.stderr, r.stderr)
+        finally:
+            os.remove(nw)
+    finally:
+        shutil.rmtree(dest, ignore_errors=True)
+
+    passed, total = sum(_ok), len(_ok)
+    print("\n%s: %d/%d checks passed" % ("PASS" if passed == total else "FAIL", passed, total))
+    return 0 if passed == total else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

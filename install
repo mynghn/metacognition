@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+"""install — deploy the LLM-Agent Knowledge Base family into both agents.
+
+Renders each sibling's `SKILL.md` adapter from ONE config-parameterized body template
+(templates/skill-body.md) + the per-sibling config + its discovery description, and writes
+the SAME adapter into both `~/.claude/skills/<name>/` and `~/.codex/skills/<name>/` — no
+plugin, no privileged agent, the two providers never diverge (DESIGN#Decision-2, Decision-8;
+SPEC#O-1, INV-3). Replaces the chezmoi `.chezmoitemplates` single-sourcing.
+
+Scope — feature 0004, task D1: the adapter rendering + both-provider deploy. The tier-gated
+`AGENTS.md` discovery block is task D2; recording the vault location + git-initialising the
+vault is task D3. The body's engine/config/vault paths are baked absolute at install time, so
+a rendered adapter is machine-specific while its source stays generic.
+
+The install is ADDITIVE: it writes/overwrites the current siblings' adapters but does not prune
+adapters for removed/renamed siblings — retiring a stale adapter is the cutover's job (M2).
+"""
+import argparse
+import os
+
+ROOT = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_VAULT = "~/.local/share/llm-agent-knowledge-vault"
+PROVIDERS = (".claude", ".codex")  # both get the byte-identical adapter
+
+
+def parse_kv(path):
+    cfg = {}
+    with open(path, encoding="utf-8") as fh:
+        for raw in fh:
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            cfg[k.strip()] = v.strip()
+    return cfg
+
+
+def title_of(stem):
+    return " ".join(w.capitalize() for w in stem.split("-")) + " Knowledge Base"
+
+
+def noun_of(index_heading):
+    h = index_heading.lower()
+    return h[:-1] if h.endswith("s") else h
+
+
+def render_adapter(sibling, vault):
+    cfg_path = os.path.join(ROOT, "config", sibling)
+    if not os.path.isfile(cfg_path):
+        raise SystemExit("install: unknown sibling %r — known: %s" % (sibling, ", ".join(siblings()) or "(none)"))
+    cfg = parse_kv(cfg_path)
+    for required in ("stem", "index_heading"):
+        if not cfg.get(required):
+            raise SystemExit("install: config/%s missing required field %r" % (sibling, required))
+    stem = cfg["stem"]
+    wiring_path = os.path.join(ROOT, "wiring", sibling)
+    wiring = parse_kv(wiring_path) if os.path.isfile(wiring_path) else {}
+    description = wiring.get("description") or cfg.get("description")
+    if not description:
+        raise SystemExit("install: no discovery description for %r — add `description = ...` to wiring/%s"
+                         % (sibling, sibling))
+    topic_dir = os.path.join(os.path.expanduser(vault), stem)
+    engine_cmd = "%s --config %s" % (os.path.join(ROOT, "engine", "kb-engine"),
+                                     os.path.join(ROOT, "config", sibling))
+    body = open(os.path.join(ROOT, "templates", "skill-body.md"), encoding="utf-8").read()
+    for token, value in (
+        ("@TITLE@", title_of(stem)),
+        ("@TOPIC@", stem),
+        ("@NOUN@", noun_of(cfg["index_heading"])),
+        ("@INDEX@", os.path.join(topic_dir, "INDEX.md")),
+        ("@KNOWLEDGE@", os.path.join(topic_dir, "knowledge", "<slug>.md")),
+        ("@ENGINE@", engine_cmd),
+    ):
+        body = body.replace(token, value)
+    name = stem + "-knowledge-base"
+    adapter = "---\nname: %s\ndescription: %s\n---\n\n%s" % (name, description, body)
+    return name, adapter
+
+
+def siblings():
+    """Sibling config files: skip the README, dotfiles (e.g. macOS .DS_Store), and any file
+    that isn't a real config (no `stem`), so a stray file never derails the whole install."""
+    cfg_dir = os.path.join(ROOT, "config")
+    out = []
+    for f in sorted(os.listdir(cfg_dir)):
+        path = os.path.join(cfg_dir, f)
+        if f.startswith(".") or f == "README.md" or not os.path.isfile(path):
+            continue
+        if "stem" in parse_kv(path):
+            out.append(f)
+    return out
+
+
+def main():
+    p = argparse.ArgumentParser(description="Install the KB family into both agents.")
+    p.add_argument("--dest", default="~", help="install prefix holding .claude/ and .codex/ (default: ~)")
+    p.add_argument("--vault", default=DEFAULT_VAULT, help="vault repo path baked into adapters")
+    p.add_argument("--only", help="install just this sibling (config/ stem or full skill name)")
+    args = p.parse_args()
+    dest = os.path.expanduser(args.dest)
+
+    only = args.only
+    if only and only.endswith("-knowledge-base"):
+        only = only[: -len("-knowledge-base")]  # accept the printed skill name too
+    targets = [only] if only else siblings()
+    for sibling in targets:
+        name, adapter = render_adapter(sibling, args.vault)
+        for provider in PROVIDERS:
+            skill_dir = os.path.join(dest, provider, "skills", name)
+            os.makedirs(skill_dir, exist_ok=True)
+            with open(os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8") as fh:
+                fh.write(adapter)
+        print("install: %s -> %s" % (name, ", ".join("%s/skills/%s/SKILL.md" % (pr, name) for pr in PROVIDERS)))
+
+
+if __name__ == "__main__":
+    main()

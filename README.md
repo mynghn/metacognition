@@ -19,8 +19,8 @@ llm-agent-knowledge-base/
 ├── templates/         single-sourced pattern templates — adapter body, INDEX skeleton,
 │                      config schema, entry/README shapes (consumed by the engine + generator)
 ├── wiring/            discovery-wiring source — per-sibling description + tier-gated AGENTS.md block
-└── install.sh         the installer — deploys adapters + wiring into both agents, records the
-                       vault location (realized in the Distribution track; form is the implementer's call)
+└── install            the installer — renders adapters from templates/ + config/ + wiring/ and
+                       deploys them into both agents (D2 adds AGENTS.md wiring; D3 adds vault setup)
 ```
 
 The skeleton above is the agreed top-level layout (feature `0004`, task F1). Each directory carries a `README.md` naming its role and the task that fills it — the engine, configs, templates, wiring, and installer are built out across `0004`'s Engine / Distribution tracks.
