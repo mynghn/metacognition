@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """generate — scaffold a new Metacognition sibling from the family registry.
 
-[G1 — input/derivation layer] Given a topic stem (+ optional CLI overrides), read
-`FAMILY.md` and DERIVE the two tooling-repo artifacts the installer consumes:
+Given a topic stem (+ optional CLI overrides), read `FAMILY.md`, DERIVE the per-sibling
+values, and SCAFFOLD the new sibling — authoring no knowledge. It writes:
 
   - `config/<stem>`  — the live 4-field per-sibling config { stem, index_heading,
     env_prefix, tier } (schema: templates/sibling-config.schema.md). There is NO `noun`
@@ -13,11 +13,18 @@
   - `wiring/<stem>`  — the single `description = …` discovery line, in the family shape:
     verb-triad opener + scope gloss + "Use when …" + bidirectional "not when … (that is
     <neighbor>)".
+  - `<vault>/<stem>/INDEX.md`  — rendered from templates/index-skeleton.md, with a
+    `## Seeds` section recording the topic's FAMILY primaries (before `## <index_heading>`
+    so the engine's INDEX upsert preserves it), and an empty entries section.
+  - `<vault>/<stem>/knowledge/`  — empty; the content build fills it later.
 
-This layer DERIVES and PREVIEWS only — it writes no files and authors no knowledge. The
-sibling is born scaffold-only; G2 instantiates the skeleton + seed record from the
-foundation templates and G3 invokes the installer. `generate` owns no structure of its
-own: every value comes from the registry row or an explicit override.
+Then (G3) it invokes the installer to emit both adapters + tier-gated wiring. `--dry-run`
+derives + PREVIEWS without writing. The sibling is born scaffold-only: empty knowledge/,
+seeds recorded for the later content build, the description a seed-and-flag draft to refine
+before install. `generate` owns no structure of its own — the INDEX shape lives in
+templates/index-skeleton.md and the adapter shape in the installer; every value comes from
+the registry row or an explicit override. It does NOT commit the vault (the author reviews
+the drafts, then installs).
 
 What is mechanical vs. authored (verified against the three shipped siblings):
 
@@ -46,6 +53,7 @@ import sys
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 TIERS = ("everyday", "common", "situational")
+DEFAULT_VAULT = "~/.local/share/metacognition-vault"
 EMDASH = "—"
 SEP = " %s " % EMDASH  # the " — " field separator FAMILY.md uses in seed lines / scope cells
 STEM_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")  # strict kebab: no leading/trailing/double hyphen
@@ -174,6 +182,11 @@ def article(word):
     return "an" if word[:1].lower() in "aeiou" else "a"
 
 
+def title_of(stem):
+    """Title-cased stem + ' Knowledge Base' — mirrors install.title_of (the @TITLE@ slot)."""
+    return " ".join(w.capitalize() for w in stem.split("-")) + " Knowledge Base"
+
+
 def existing_env_prefixes(config_dir, exclude_stem):
     """{ env_prefix: owning-stem } across config/*, excluding the target stem's own file
     (so re-generating an existing sibling does not collide with itself)."""
@@ -217,6 +230,16 @@ def resolve_inputs(stem, fam, args):
     }
 
 
+def reserved_headings():
+    """The literal `## <Name>` headings in the INDEX template (e.g. `## Seeds`), EXCLUDING the
+    `## @INDEX_HEADING@` slot. An index_heading equal to one of these would make the engine's
+    _index_heading_pos anchor entries on the WRONG section (the seed shelf). Sourced from the
+    template so the reserved set stays owned by it (Decision-1: no structure re-encoded here)."""
+    tpl = open(os.path.join(ROOT, "templates", "index-skeleton.md"), encoding="utf-8").read()
+    return {m.group(1).lower() for line in tpl.splitlines()
+            for m in [re.match(r"^##\s+(.+?)\s*$", line)] if m and "@INDEX_HEADING@" not in m.group(1)}
+
+
 def derive_config(inputs, args, config_dir):
     """The live 4-field config dict. Order matches the shipped files."""
     stem = inputs["stem"]
@@ -225,6 +248,16 @@ def derive_config(inputs, args, config_dir):
         die("tier for %r is %r — must be one of %s (set it in FAMILY.md or pass --tier)"
             % (stem, tier or "(none)", ", ".join(TIERS)))
     index_heading = (args.index_heading or "Concepts").strip()
+    # index_heading becomes a `## ` heading + the @NOUN@ slot; validate the single source value so
+    # every rendered slot is safe. Charset bars markdown-active chars; the reserved check bars a
+    # collision with the template's own `## Seeds` scaffold section (engine would mis-anchor).
+    if not re.match(r"^[A-Za-z0-9][A-Za-z0-9 &/-]*$", index_heading):
+        die("index_heading %r has markdown-active or unusual characters — use letters, digits, "
+            "spaces, and & / - (it becomes a `## ` heading and the entry noun)" % index_heading)
+    if index_heading.lower() in reserved_headings():
+        die("index_heading %r collides with a reserved `## %s` scaffold section in the INDEX "
+            "template — the engine would anchor entries on the wrong section. Pick another heading."
+            % (index_heading, index_heading))
     # Uniqueness is checked on BOTH branches: --env-prefix is the exact escape the
     # auto-derived collision error tells authors to take, so it must be guarded too — else
     # an author resolving one collision could silently pick another taken prefix. The
@@ -316,29 +349,99 @@ def render_config_file(config):
     return "".join("%s = %s\n" % (k, config[k]) for k in ("stem", "index_heading", "env_prefix", "tier"))
 
 
-def preview(inputs, config, description, todos):
-    """Print the two artifacts exactly as they would be written, plus seeds + TODOs.
-
-    Stdout is the would-be file content (diffable / copy-pasteable); stderr carries the
-    authoring TODOs and any warnings.
-    """
-    stem = inputs["stem"]
-    out = []
-    out.append("# config/%s" % stem)
-    out.append(render_config_file(config).rstrip("\n"))
-    out.append("")
-    out.append("# wiring/%s" % stem)
-    out.append("description = %s" % description)
-    out.append("")
-    out.append("# seeds (read from FAMILY.md; recorded into the vault by G2, not here):")
+def render_seeds_list(inputs):
+    """The `## Seeds` bullet list — the topic's FAMILY primaries, or an [AUTHOR] stub when the
+    registry records none (kept visible + flagged, per the seed-and-flag convention)."""
     if inputs["seeds"]:
-        for sd in inputs["seeds"]:
-            out.append("#   - %s" % sd)
-    else:
-        out.append("#   (none in the registry for this stem)")
-    sys.stdout.write("\n".join(out) + "\n")
+        return "\n".join("- %s" % sd for sd in inputs["seeds"])
+    return "- " + (AUTHOR % "record the topic's primary sources (none in FAMILY.md)")
 
-    sys.stderr.write("\ngenerate: %s previewed — no files written (G1 derivation layer).\n" % stem)
+
+def render_index_skeleton(config, inputs):
+    """Render templates/index-skeleton.md with the topic's tokens. Structure lives in the
+    template (Decision-1: no structure re-encoded here); only token VALUES come from here."""
+    tpl = open(os.path.join(ROOT, "templates", "index-skeleton.md"), encoding="utf-8").read()
+    heading = config["index_heading"]
+    for token, value in (
+        ("@TITLE@", title_of(config["stem"])),
+        ("@TOPIC@", config["stem"]),
+        ("@NOUN_PLURAL@", heading.lower()),
+        ("@NOUN@", noun_of(heading)),
+        ("@INDEX_HEADING@", heading),
+        ("@SEEDS_LIST@", render_seeds_list(inputs)),
+    ):
+        tpl = tpl.replace(token, value)
+    return tpl
+
+
+def resolve_vault(explicit):
+    """Vault repo root: --vault, else the installer-recorded location, else the standard
+    default — the engine/installer precedence minus the env hooks (irrelevant at scaffold)."""
+    if explicit:
+        return os.path.abspath(os.path.expanduser(explicit))
+    conf = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
+                        "metacognition", "vault")
+    if os.path.isfile(conf):
+        rec = open(conf, encoding="utf-8").read().strip()
+        if rec:
+            return os.path.abspath(os.path.expanduser(rec))
+    return os.path.abspath(os.path.expanduser(DEFAULT_VAULT))
+
+
+_ENTRY_RE = re.compile(r"(?m)^- \[([a-z0-9-]+)\]\(knowledge/\1\.md\) — ")  # mirrors the engine's INDEX entry line
+
+
+def write_artifacts(inputs, config, description, vault, config_dir, wiring_dir, force):
+    """Write the scaffold and return the written paths. Refuses to clobber an already-scaffolded
+    sibling unless force. Writes files only — never commits the vault.
+
+    Atomic at the file level: ALL three artifact bodies are rendered into memory BEFORE any
+    destination is opened, so a render failure (e.g. a missing template) cannot leave a
+    half-scaffold (config+wiring written, INDEX 0-byte → a born-NOT-running sibling). I/O
+    failures surface as clean `generate:` errors, never a traceback."""
+    stem = config["stem"]
+    cfg_path = os.path.join(config_dir, stem)
+    wir_path = os.path.join(wiring_dir, stem)
+    topic = os.path.join(vault, stem)
+    knowledge = os.path.join(topic, "knowledge")
+    index = os.path.join(topic, "INDEX.md")
+    if os.path.exists(vault) and not os.path.isdir(vault):
+        die("vault path %r is not a directory" % vault)
+
+    clash = [p for p in (cfg_path, wir_path, index) if os.path.exists(p)]
+    if clash and not force:
+        die("refusing to overwrite an already-scaffolded sibling %r — exists: %s. --force "
+            "rewrites config + wiring + INDEX, re-rendering the INDEX from the empty skeleton "
+            "(which de-indexes any captured entries; the knowledge/*.md files are kept and "
+            "re-linkable via the engine's `refresh`)." % (stem, ", ".join(clash)))
+    if force and os.path.isfile(index):
+        slugs = _ENTRY_RE.findall(open(index, encoding="utf-8").read())
+        if slugs:
+            warn("--force re-renders %s/INDEX.md from the empty skeleton, DE-INDEXING %d entr%s: "
+                 "%s — the knowledge/*.md files are kept; re-link with the engine's `refresh`."
+                 % (stem, len(slugs), "y" if len(slugs) == 1 else "ies", ", ".join(slugs)))
+
+    try:  # render BEFORE opening any destination — atomicity
+        bodies = [(cfg_path, render_config_file(config)),
+                  (wir_path, "description = %s\n" % description),
+                  (index, render_index_skeleton(config, inputs))]
+    except OSError as e:
+        die("cannot render the scaffold (templates/index-skeleton.md): %s" % (e.strerror or e))
+    try:
+        os.makedirs(config_dir, exist_ok=True)
+        os.makedirs(wiring_dir, exist_ok=True)
+        os.makedirs(knowledge, exist_ok=True)
+        for path, body in bodies:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(body)
+    except OSError as e:
+        die("cannot write the scaffold: %s" % (e.strerror or e))
+    return {"config": cfg_path, "wiring": wir_path, "INDEX": index, "knowledge/": knowledge}
+
+
+def report(inputs, stem, todos, mode):
+    """Authoring reminders + notes to stderr (shared by preview and write)."""
+    sys.stderr.write("\ngenerate: %s %s.\n" % (stem, mode))
     if not inputs["in_registry"]:
         sys.stderr.write("generate: NOTE %r is not in the registry; derived from CLI overrides only.\n" % stem)
     if todos:
@@ -347,14 +450,34 @@ def preview(inputs, config, description, todos):
             sys.stderr.write("  - %s\n" % t)
 
 
+def preview(inputs, config, description, vault, todos):
+    """Print the artifacts exactly as they would be written (stdout), plus authoring TODOs
+    (stderr). Stdout is diffable / copy-pasteable would-be file content."""
+    stem = config["stem"]
+    out = []
+    out.append("# config/%s" % stem)
+    out.append(render_config_file(config).rstrip("\n"))
+    out.append("")
+    out.append("# wiring/%s" % stem)
+    out.append("description = %s" % description)
+    out.append("")
+    out.append("# %s/%s/INDEX.md" % (vault, stem))
+    out.append(render_index_skeleton(config, inputs).rstrip("\n"))
+    sys.stdout.write("\n".join(out) + "\n")
+    report(inputs, stem, todos, "previewed — no files written (--dry-run)")
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(
-        description="Derive a new Metacognition sibling's config + discovery description "
-                    "from the family registry (FAMILY.md). Previews only; writes no files.")
+        description="Scaffold a new Metacognition sibling from the family registry (FAMILY.md): "
+                    "write its config + discovery description (tooling repo) and vault topic "
+                    "folder (INDEX + seeds + empty knowledge/). --dry-run previews without writing.")
     p.add_argument("stem", help="topic stem (a FAMILY.md row; e.g. agent-architectures)")
     p.add_argument("--family", default=os.path.join(ROOT, "FAMILY.md"), help="registry path")
     p.add_argument("--config-dir", default=os.path.join(ROOT, "config"),
-                   help="existing configs, for the env_prefix collision check")
+                   help="config/ dir — write target + env_prefix collision check")
+    p.add_argument("--wiring-dir", default=os.path.join(ROOT, "wiring"), help="wiring/ dir — write target")
+    p.add_argument("--vault", help="vault repo root (default: installer-recorded location, else %s)" % DEFAULT_VAULT)
     p.add_argument("--index-heading", help="INDEX section heading (default: Concepts)")
     p.add_argument("--env-prefix", help="<PREFIX>_KB_VAULT prefix (default: stem initials)")
     p.add_argument("--tier", help="everyday|common|situational (default: from FAMILY.md)")
@@ -362,13 +485,27 @@ def main(argv=None):
     p.add_argument("--boundary", help="override the Boundary cell used for neighbour parsing")
     p.add_argument("--noun", help="override the description's tail noun (default: from index_heading)")
     p.add_argument("--description", help="override the WHOLE description verbatim (escape hatch)")
+    p.add_argument("--dry-run", action="store_true", help="derive + preview; write nothing")
+    p.add_argument("--force", action="store_true", help="overwrite an already-scaffolded sibling")
     args = p.parse_args(argv)
 
     fam = parse_family(args.family)
     inputs = resolve_inputs(args.stem, fam, args)
     config = derive_config(inputs, args, args.config_dir)
     description, todos = derive_description(inputs, config, fam, args)
-    preview(inputs, config, description, todos)
+    if not inputs["seeds"]:
+        todos.append("INDEX ## Seeds: [AUTHOR] no primary sources recorded in FAMILY.md")
+    vault = resolve_vault(args.vault)
+
+    if args.dry_run:
+        preview(inputs, config, description, vault, todos)
+        return 0
+
+    written = write_artifacts(inputs, config, description, vault, args.config_dir, args.wiring_dir, args.force)
+    sys.stdout.write("generate: scaffolded %s —\n" % config["stem"])
+    for k in ("config", "wiring", "INDEX", "knowledge/"):
+        sys.stdout.write("  %s: %s\n" % (k, written[k]))
+    report(inputs, config["stem"], todos, "scaffolded")
     return 0
 
 
