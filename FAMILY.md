@@ -4,15 +4,15 @@ The "should I add a sibling?" decision record for a **federated** family of agen
 
 ## Model
 
-Federated focused skills, not one broad KB. Each sibling = one coherent, closeable agent-practice topic, realized as the proven pattern: a provider-neutral shared core (`~/.local/share/<topic>-knowledge-base/`: INDEX + `knowledge/` + a `ce-kb`-style helper) with thin Claude + Codex `SKILL.md` adapters; entries distilled, self-contained, sourced + dated; retrieval is INDEX → JIT; mutation is source-write → `chezmoi apply` → commit.
+Federated focused skills, not one broad KB. Each sibling = one coherent, closeable agent-practice topic, realized as the proven pattern: a provider-neutral shared core — one `<topic>/` folder in the **`metacognition-vault`** repo (INDEX + `knowledge/`), operated by the **shared engine** (`metacognition/engine/kb-engine` + the thin per-sibling `config/`) — with thin Claude + Codex `SKILL.md` adapters rendered by the installer from one body template; entries distilled, self-contained, sourced + dated; retrieval is INDEX → JIT; mutation is an engine-validated write → exactly one commit in the vault repo's own history.
 
 Why federated: small coherent units retrieve precisely (a skill auto-invokes on its `description` — a narrow description is a sharp trigger), avoid the broad-index scaling cost, and isolate by topic.
 
-**Admission test for a new sibling:** coherent + closeable + backed by primary sources + non-overlapping with existing siblings. Don't extract a shared pattern/generator until ≥3 siblings exist (rule of three) — `context-engineering-knowledge-base` is the de-facto template until then.
+**Admission test for a new sibling:** coherent + closeable + backed by primary sources + non-overlapping with existing siblings. The rule of three (don't extract a shared pattern/generator until ≥3 siblings exist) is now **met and realized** — with three siblings built, feature `0004` extracted the shared engine + single-sourced templates into this repo; a new sibling is a `{ template + config + description }` instance, not a hand-encoded copy (the generator that automates this is feature `0005`).
 
 ## Naming convention
 
-Spelled-out everywhere: skill name, both adapter dirs (`~/.claude/skills/…`, `~/.codex/skills/…`), and the core dir (`~/.local/share/…`) all use `<topic>-knowledge-base` — confirmed on `context-engineering-knowledge-base`. `-kb` is not used in user-facing names. The family-table entries below are topic **stems**; the realized skill/dir name appends `-knowledge-base` (e.g. `prompt-engineering` → `prompt-engineering-knowledge-base`).
+The skill name and both adapter dirs (`~/.claude/skills/…`, `~/.codex/skills/…`) use `<topic>-knowledge-base` — confirmed on `context-engineering-knowledge-base`; `-kb` is not used in user-facing names. The vault stores each topic as a bare **`<topic>/`** folder (stem only, no suffix). The family-table entries below are topic **stems**; the realized skill name appends `-knowledge-base` (e.g. `prompt-engineering` → `prompt-engineering-knowledge-base`), while its vault folder is just `prompt-engineering/`.
 
 This registry root is `metacognition` and is a **registry, not a skill** — it has no `SKILL.md` and is never auto-invoked. The siblings are the skills; this is their map.
 
