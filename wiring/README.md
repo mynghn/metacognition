@@ -9,6 +9,6 @@ The installer wraps the `.agents.md` body in a `<tag>…</tag>` whose tag is the
 
 Common / Situational siblings get description-only discovery (no `.agents.md`) — they cost nothing in an agent turn until the work matches. `tier` comes from the per-sibling [`config/`](../config). This consolidates today's hand-maintained, 6×-duplicated wiring.
 
-DESIGN Decision-5 (discovery-wiring-emitted-tier-gated). The per-sibling `description` is single-sourced in D1 (rendered into both adapters); the tier-gated `AGENTS.md` block emission is D2.
+Discovery wiring is emitted tier-gated. The per-sibling `description` is single-sourced (rendered into both adapters); the tier-gated `AGENTS.md` block is emitted from the same source.
 
-> **Shared file, split ownership.** The shared `AGENTS.md` is only *partly* installer-owned: each sibling's named span is managed by the installer; everything else (the user's operating frame) is the user's. On a personal machine that file is still chezmoi-managed until **B1** drops the two sibling spans from the chezmoi source, making the installer their sole owner. Until then, run the installer against a `--dest` sandbox — not the live `~/AGENTS.md`.
+> **Shared file, split ownership.** The shared `AGENTS.md` is only *partly* installer-owned: each sibling's named span is managed by the installer; everything else (the user's operating frame) is the user's. On a personal machine that file may still be chezmoi-managed; until the chezmoi source drops the two sibling spans (so the installer is their sole owner), run the installer against a `--dest` sandbox — not the live `~/AGENTS.md`.

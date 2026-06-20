@@ -4,16 +4,16 @@
 ONE engine backs every sibling's capture / refresh / remove / locate, parameterized
 by a thin per-sibling config. Re-derived from the three near-duplicate `*-kb` scripts
 (which were byte-identical but for per-sibling tokens), so the family's operations live
-in a single source (SPEC#INV-2) and an operation change takes effect family-wide with no
-per-sibling copy to edit (SPEC#O-3). DESIGN#Decision-3.
+in a single source and an operation change takes effect family-wide with no per-sibling
+copy to edit.
 
-Scope — feature 0004, tasks E1 + E2: validate + write the entry + upsert the slug-sorted
-INDEX + remove + locate against a vault folder (E1), then record each change as exactly one
-commit in the vault repo's own history, resolving the vault location from env / installer
-config / a standard default (E2, DESIGN#Decision-4). There is NO chezmoi path — the legacy
-source-write -> `chezmoi apply` -> commit-into-dotfiles is gone; every mutation is one
-validated channel straight to the vault repo (SPEC#O-2, INV-1, INV-4). Validation, write, and
-commit all live here, so nothing bypasses them.
+It validates + writes the entry + upserts the slug-sorted INDEX (and removes / locates)
+against a vault folder, then records each change as exactly one commit in the vault repo's
+own history, resolving the vault location from env / installer config / a standard default.
+There is NO chezmoi path — the legacy source-write -> `chezmoi apply` -> commit-into-dotfiles
+is gone; every mutation is one validated channel straight to the vault repo, so a knowledge
+change records to the vault's own history and never to personal config. Validation, write,
+and commit all live here, so nothing bypasses them.
 
 Operation semantics are preserved exactly from the `*-kb` scripts:
   - frontmatter: `name` == slug, non-empty `description`, `last_refreshed` present, `sources` present
@@ -24,7 +24,7 @@ Operation semantics are preserved exactly from the `*-kb` scripts:
 
 A per-sibling config is a flat `key = value` file (see templates/sibling-config.schema.md).
 The engine consumes `stem` (the vault topic folder), `index_heading`, and `env_prefix`
-(vault-location override); `tier` is reserved for D2 (discovery wiring).
+(vault-location override); `tier` is reserved for the installer's discovery wiring.
 """
 import argparse
 import os
@@ -76,13 +76,11 @@ DEFAULT_VAULT = "~/.local/share/metacognition-vault"
 
 
 def resolve_vault(explicit, cfg):
-    """Resolve the vault repo location (DESIGN#Decision-4), in precedence order:
+    """Resolve the vault repo location, in precedence order:
     explicit `--vault`; a per-sibling `<PREFIX>_KB_VAULT` env override; the family-level
     `KB_VAULT` env; the installer-recorded config file; then a standard default. The vault
     is ONE repo holding every topic, so `KB_VAULT` is the family override and
-    `<PREFIX>_KB_VAULT` is the per-sibling hook (the Decision-1 invalidation trigger:
-    a sibling that ever needs its own vault). The config file is written by the installer
-    (task D3); its path is the engine<->installer contract.
+    `<PREFIX>_KB_VAULT` is the per-sibling hook (the escape hatch for a sibling that ever needs its own vault). The config file is written by the installer; its path is the engine<->installer contract.
     """
     chosen = _clean_path(explicit)
     if chosen:
@@ -117,9 +115,9 @@ def _clean_path(value):
 def _require_git_repo(vault):
     """The vault must be a git repo ROOT — mutation records to its OWN history. Checked
     before any write so a missing / non-repo / nested-inside-another-repo vault fails before
-    the working tree is touched. The root check is load-bearing for SPEC#INV-1: a vault dir
-    nested inside an outer repo (e.g. an uninitialized vault under a git-tracked $HOME) must
-    NOT let a change commit into that outer/dotfiles repo — the exact leak the rehome kills."""
+    the working tree is touched. The root check is load-bearing: a vault dir nested inside an
+    outer repo (e.g. an uninitialized vault under a git-tracked $HOME) must NOT let a change
+    commit into that outer/dotfiles repo — the exact leak this home is built to prevent."""
     if not os.path.isdir(vault):
         die("vault not found: %s (run the installer, or pass --vault)" % vault)
     try:
@@ -156,8 +154,8 @@ def _rollback(vault, rels):
 
 def commit_change(vault, cfg, slug, verb):
     """Stage the entry + INDEX and record exactly one commit in the vault repo's history,
-    scoped to those two paths. The mutation and its commit are one engine step (SPEC#INV-4):
-    on any git failure the working tree is rolled back to HEAD, so a half-written change can
+    scoped to those two paths. The mutation and its commit are one engine step — a single
+    controlled channel: on any git failure the working tree is rolled back to HEAD, so a half-written change can
     never persist, and git errors surface as a clean message rather than a Python traceback."""
     rels = [
         os.path.join(cfg["stem"], "knowledge", slug + ".md"),
@@ -270,7 +268,7 @@ def write_entry(verb, vault, cfg, slug):
     body = sys.stdin.read().replace("\r\n", "\n").replace("\r", "\n")
 
     # Validate EVERYTHING (frontmatter + INDEX section) before any write, so a rejected
-    # op never leaves an orphan entry or half-written INDEX (SPEC#INV-4). The `*-kb`
+    # op never leaves an orphan entry or half-written INDEX. The `*-kb`
     # scripts wrote the entry before checking the heading; pre-validating closes that gap
     # with no change on valid input.
     desc = _validate_frontmatter(body, slug)
@@ -317,7 +315,7 @@ def locate(vault, cfg, slug):
 def main(argv=None):
     p = argparse.ArgumentParser(prog=PROG, description="Shared KB operations engine.")
     p.add_argument("--config", required=True, help="per-sibling config file (key = value)")
-    p.add_argument("--vault", help="vault repo root (default: resolved per DESIGN Decision-4 — "
+    p.add_argument("--vault", help="vault repo root (default: resolved by precedence — "
                                    "$<PREFIX>_KB_VAULT / $KB_VAULT / installer config / %s)" % DEFAULT_VAULT)
     sub = p.add_subparsers(dest="op", required=True)
     for op in ("capture", "refresh"):

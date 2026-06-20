@@ -7,7 +7,7 @@ Two independent repos, two histories:
 - **`metacognition`** (this repo) — the tooling: a shared operations engine, the thin per-sibling config, single-sourced pattern templates, the discovery-wiring source, the [`FAMILY.md`](./FAMILY.md) registry, and the installer. Released + versioned (low churn).
 - **`metacognition-vault`** — one Obsidian-shaped vault, a top-level `<topic>/` folder per sibling. Mutated + committed at runtime by the engine (high churn).
 
-Splitting them keeps runtime knowledge writes off the tooling history and lets either be published or installed on its own. See `docs/features/0004-knowledge-base-rehome/` (DESIGN Decision-1).
+Splitting them keeps runtime knowledge writes off the tooling history and lets either be published or installed on its own.
 
 ## Layout
 
@@ -20,14 +20,14 @@ metacognition/
 │                      config schema, entry/README shapes (consumed by the engine + generator)
 ├── wiring/            discovery-wiring source — per-sibling description + tier-gated AGENTS.md block
 └── install            the installer — renders adapters from templates/ + config/ + wiring/ and
-                       deploys them into both agents (D2 adds AGENTS.md wiring; D3 adds vault setup)
+                       deploys them into both agents (plus the AGENTS.md wiring + vault setup)
 ```
 
-The skeleton above is the agreed top-level layout (feature `0004`, task F1). Each directory carries a `README.md` naming its role and the task that fills it — the engine, configs, templates, wiring, and installer are built out across `0004`'s Engine / Distribution tracks.
+Each directory carries a `README.md` naming its role. Together the engine, configs, templates, wiring, and installer are the family's shared machinery.
 
 ## Install
 
-A plain installer (built in `0004` Distribution) deploys each sibling's `SKILL.md` adapter into `~/.claude/skills/<name>/` and `~/.codex/skills/<name>/`, emits the discovery wiring, and records where the vault lives — no plugin, no privileged agent. On personal machines, chezmoi optionally bootstraps the family by cloning both repos (a consumer of the installer, not its home — mirroring the existing `leanplan` external).
+A plain installer deploys each sibling's `SKILL.md` adapter into `~/.claude/skills/<name>/` and `~/.codex/skills/<name>/`, emits the discovery wiring, and records where the vault lives — no plugin, no privileged agent. On personal machines, chezmoi optionally bootstraps the family by cloning both repos (a consumer of the installer, not its home).
 
 ## License
 

@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""install-selftest — robustness + idempotency tests for the installer (feature 0004, D1+D2+D3).
+"""install-selftest — robustness + idempotency tests for the installer.
 
 Encodes the adversarial findings so they cannot regress: byte-identical Claude/Codex adapters,
 idempotent re-run, stray/dotfiles in config/ skipped (not mis-treated as siblings), and CLEAN
 errors (no Python tracebacks) for an unknown --only / a config missing a required field / a
 sibling with no discovery description.
 
-D2 (tier-gated AGENTS.md trigger blocks): an Everyday-tier sibling gets its named block emitted
+Tier-gated AGENTS.md trigger blocks: an Everyday-tier sibling gets its named block emitted
 byte-exact into the shared AGENTS.md; a Situational sibling gets none; the upsert is SURGICAL
 (replaces only its own <tag>...</tag> span, preserves every other block) and idempotent; and a
 tier=everyday sibling missing its block file is a clean error.
 
-D3 (vault setup): the installer git-inits the vault as a repo ROOT, records its location at
+Vault setup: the installer git-inits the vault as a repo ROOT, records its location at
 $XDG_CONFIG_HOME/metacognition/vault, and the engine then resolves that vault with no
 --vault/env. Every install here runs in a sandboxed vault + $XDG_CONFIG_HOME so the real ~/.config
 and the live vault are never touched.
@@ -112,7 +112,7 @@ def main():
         finally:
             os.remove(nw)
 
-        # ---- D2: tier-gated AGENTS.md trigger-block emission ----
+        # ---- tier-gated AGENTS.md trigger-block emission ----
         def expected_block(stem):
             body = open(os.path.join(ROOT, "wiring", stem + ".agents.md"), encoding="utf-8").read()
             tag = stem.replace("-", "_")
@@ -248,35 +248,35 @@ def main():
             os.remove(bk)
             os.remove(wbk)
 
-        # ---- D3: vault git-init (repo root) + location recorded + engine resolves it ----
+        # ---- vault git-init (repo root) + location recorded + engine resolves it ----
         conf = os.path.join(os.environ["XDG_CONFIG_HOME"], "metacognition", "vault")
         top = subprocess.run(["git", "-C", _VAULT, "rev-parse", "--show-toplevel"], capture_output=True, text=True)
-        check("D3: vault git-inited as a repo root",
+        check("vault git-inited as a repo root",
               top.returncode == 0 and os.path.realpath(top.stdout.strip()) == os.path.realpath(_VAULT), top.stderr)
-        check("D3: vault location recorded for the engine",
+        check("vault location recorded for the engine",
               os.path.isfile(conf) and open(conf, encoding="utf-8").read().strip() == os.path.abspath(_VAULT))
         eng = subprocess.run([sys.executable, ENGINE, "--config", os.path.join(CONFIG, "context-engineering"), "locate"],
                              capture_output=True, text=True)
         resolved = next((ln.split(":", 1)[1].strip() for ln in eng.stdout.splitlines() if ln.startswith("vault:")), "")
-        check("D3: engine resolves the recorded vault (no --vault/env)",
+        check("engine resolves the recorded vault (no --vault/env)",
               eng.returncode == 0 and resolved == os.path.abspath(_VAULT), (eng.stdout + eng.stderr).strip())
         before = open(conf, encoding="utf-8").read()
         run(["--dest", dest])
-        check("D3: re-install idempotent (recorded vault unchanged)", open(conf, encoding="utf-8").read() == before)
+        check("re-install idempotent (recorded vault unchanged)", open(conf, encoding="utf-8").read() == before)
         # an absent vault dir is created + git-inited (the fresh-setup, non-clone path)
         fresh = os.path.join(sb, "fresh-vault")
         rf = run(["--dest", dest, "--vault", fresh, "--only", "tool-design"])
         topf = subprocess.run(["git", "-C", fresh, "rev-parse", "--show-toplevel"], capture_output=True, text=True)
-        check("D3: absent vault is created + git-inited",
+        check("absent vault is created + git-inited",
               rf.returncode == 0 and topf.returncode == 0
               and os.path.realpath(topf.stdout.strip()) == os.path.realpath(fresh), rf.stderr)
         # a vault path that is a file -> clean error (no traceback)
         ff = os.path.join(sb, "vault-is-a-file")
         open(ff, "w").write("x")
         rbv = run(["--dest", dest, "--only", "tool-design", "--vault", ff])
-        check("D3: vault-is-a-file clean error",
+        check("vault-is-a-file clean error",
               rbv.returncode != 0 and "not a directory" in rbv.stderr and "Traceback" not in rbv.stderr, rbv.stderr)
-        # a vault NESTED in an outer repo is re-rooted as its OWN root (INV-1: no commit can escape upward)
+        # a vault NESTED in an outer repo is re-rooted as its OWN root (no commit can escape upward)
         outer = os.path.join(sb, "outer")
         nested = os.path.join(outer, "vault")
         os.makedirs(nested)
@@ -284,7 +284,7 @@ def main():
         before = subprocess.run(["git", "-C", nested, "rev-parse", "--show-toplevel"], capture_output=True, text=True).stdout.strip()
         run(["--dest", dest, "--only", "tool-design", "--vault", nested])
         topn = subprocess.run(["git", "-C", nested, "rev-parse", "--show-toplevel"], capture_output=True, text=True)
-        check("D3: nested vault re-rooted (INV-1)",
+        check("nested vault re-rooted (no commit escapes to the enclosing repo)",
               os.path.realpath(before) == os.path.realpath(outer)  # the vault really resolved UP to the outer repo before
               and topn.returncode == 0 and os.path.realpath(topn.stdout.strip()) == os.path.realpath(nested),  # now its own root
               "before=%s topn=%s" % (before, (topn.stdout + topn.stderr).strip()))

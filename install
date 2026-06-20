@@ -4,30 +4,29 @@
 Renders each sibling's `SKILL.md` adapter from ONE config-parameterized body template
 (templates/skill-body.md) + the per-sibling config + its discovery description, and writes
 the SAME adapter into both `~/.claude/skills/<name>/` and `~/.codex/skills/<name>/` — no
-plugin, no privileged agent, the two providers never diverge (DESIGN#Decision-2, Decision-8;
-SPEC#O-1, INV-3). Replaces the chezmoi `.chezmoitemplates` single-sourcing.
+plugin, no privileged agent, the two providers never diverge. Replaces the chezmoi
+`.chezmoitemplates` single-sourcing.
 
-Scope — feature 0004, tasks D1 + D2 + D3: render each sibling's adapter and deploy the
-byte-identical adapter to both providers (D1); emit the tier-gated discovery wiring (D2) — the
-`description` into both adapters always, plus, for Everyday-tier siblings only, a named trigger
-block upserted into the shared `AGENTS.md` (which both `~/.claude/CLAUDE.md` and
-`~/.codex/AGENTS.md` symlink to; `tier` comes from the per-sibling config); and set up the vault
-(D3) — ensure it is a git repo ROOT and record its location where the engine resolves it, so a
-clean clone-and-install needs no personal config. The body's engine/config/vault paths are baked
-absolute at install time, so a rendered adapter is machine-specific while its source stays generic.
+It does three things: render each sibling's adapter and deploy the byte-identical adapter to
+both providers; emit the tier-gated discovery wiring — the `description` into both adapters
+always, plus, for Everyday-tier siblings only, a named trigger block upserted into the shared
+`AGENTS.md` (which both `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` symlink to; `tier` comes
+from the per-sibling config); and set up the vault — ensure it is a git repo ROOT and record its
+location where the engine resolves it, so a clean clone-and-install needs no personal config. The
+body's engine/config/vault paths are baked absolute at install time, so a rendered adapter is
+machine-specific while its source stays generic.
 
 The AGENTS.md emission is SURGICAL: it inserts-or-replaces only its own named `<tag>...</tag>`
 span and leaves every other block (the user's operating instructions) byte-for-byte untouched,
-idempotent on re-run — it never rewrites the file. With the default `--dest ~` the shared file
-is the live `~/AGENTS.md`, which stays chezmoi-managed until B1 retires the blocks from the
-chezmoi source — so D1/D2 testing must pass `--dest <sandbox>`; the M2/B1 cutover owns the first
-live write (and may add a `--cutover` guard there). D3's vault setup likewise writes a live file —
-`$XDG_CONFIG_HOME/metacognition/vault` (the real `~/.config` when XDG is unset) — and
-git-inits `--vault`; these are gated by `$XDG_CONFIG_HOME` / `--vault`, NOT `--dest`, so non-cutover
-testing must sandbox ALL THREE (`--dest`, `$XDG_CONFIG_HOME`, and a sandbox `--vault`).
+idempotent on re-run — it never rewrites the file. With the default `--dest ~` the shared file is
+the live `~/AGENTS.md`, which on a personal machine stays chezmoi-managed — so test against a
+`--dest <sandbox>`, not the live file. The vault setup likewise writes a live file —
+`$XDG_CONFIG_HOME/metacognition/vault` (the real `~/.config` when XDG is unset) — and git-inits
+`--vault`; these are gated by `$XDG_CONFIG_HOME` / `--vault`, NOT `--dest`, so testing must
+sandbox ALL THREE (`--dest`, `$XDG_CONFIG_HOME`, and a sandbox `--vault`).
 
 The install is ADDITIVE: it writes/overwrites the current siblings' adapters but does not prune
-adapters for removed/renamed siblings — retiring a stale adapter is the cutover's job (M2).
+adapters for removed/renamed siblings — retiring a stale adapter is a manual cutover step.
 """
 import argparse
 import os
@@ -37,7 +36,7 @@ import subprocess
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_VAULT = "~/.local/share/metacognition-vault"
 PROVIDERS = (".claude", ".codex")  # both get the byte-identical adapter
-TIERS = ("everyday", "common", "situational")  # Decision-5 gating; only `everyday` emits an AGENTS.md block
+TIERS = ("everyday", "common", "situational")  # discovery-wiring gate; only `everyday` emits an AGENTS.md block
 
 
 def parse_kv(path):
@@ -108,7 +107,7 @@ def agents_block(sibling, stem):
     The block body is single-sourced in `wiring/<sibling>.agents.md`; the tag is the
     stem with hyphens as underscores. Wrapping the body in its tag here keeps the tag
     single-sourced from the stem — the mirror of how render_adapter wraps the adapter
-    body in its frontmatter (DESIGN#Decision-5). The body must not embed its own closing
+    body in its frontmatter. The body must not embed its own closing
     tag (the installer adds it), and is normalised to exactly one trailing newline so the
     wrap is insensitive to the body file's trailing-newline shape."""
     path = os.path.join(ROOT, "wiring", sibling + ".agents.md")
@@ -157,7 +156,7 @@ def config_home():
 def ensure_vault_repo(vault):
     """Make the vault a git repo ROOT and return its absolute path. Creates the directory and
     `git init`s it when absent — or when it sits INSIDE another repo (which would let a mutation
-    commit into that enclosing repo, the exact SPEC#INV-1 leak the engine refuses); a no-op when
+    commit into that enclosing repo, the exact leak the engine refuses); a no-op when
     it is already its own repo root, so a freshly-cloned vault is left untouched. Idempotent."""
     if not vault or not vault.strip():
         raise SystemExit("install: --vault must not be empty")
@@ -180,7 +179,7 @@ def ensure_vault_repo(vault):
 
 
 def record_vault_location(vault):
-    """Write the engine<->installer contract file (DESIGN#Decision-4): the vault's absolute path
+    """Write the engine<->installer contract file: the vault's absolute path
     at $XDG_CONFIG_HOME/metacognition/vault, so the engine resolves the vault with no
     --vault/env on a clean install. Writes only on change. Returns the file path."""
     conf = os.path.join(config_home(), "metacognition", "vault")
@@ -209,7 +208,7 @@ def siblings():
 def main():
     p = argparse.ArgumentParser(description="Install the KB family into both agents.")
     p.add_argument("--dest", default="~", help="install prefix holding .claude/, .codex/, and the shared "
-                   "AGENTS.md (default: ~ — the live chezmoi-managed file; pass a sandbox for D1/D2 testing)")
+                   "AGENTS.md (default: ~ — the live chezmoi-managed file; pass a sandbox for testing)")
     p.add_argument("--vault", default=DEFAULT_VAULT, help="vault repo path — baked into adapters, "
                    "git-initialised as a repo root, and recorded for the engine (default: %s)" % DEFAULT_VAULT)
     p.add_argument("--only", help="install just this sibling (config/ stem or full skill name)")
@@ -233,7 +232,7 @@ def main():
             tag = upsert_agents_block(agents_path, block)
             print("install: AGENTS.md <%s> trigger block -> %s" % (tag, agents_path))
 
-    # D3: family-level vault setup, once per run (after the siblings render cleanly)
+    # family-level vault setup, once per run (after the siblings render cleanly)
     vault = ensure_vault_repo(args.vault)
     conf = record_vault_location(vault)
     print("install: vault -> %s  (recorded in %s)" % (vault, conf))

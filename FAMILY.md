@@ -8,7 +8,7 @@ Federated focused skills, not one broad KB. Each sibling = one coherent, closeab
 
 Why federated: small coherent units retrieve precisely (a skill auto-invokes on its `description` — a narrow description is a sharp trigger), avoid the broad-index scaling cost, and isolate by topic.
 
-**Admission test for a new sibling:** coherent + closeable + backed by primary sources + non-overlapping with existing siblings. The rule of three (don't extract a shared pattern/generator until ≥3 siblings exist) is now **met and realized** — with three siblings built, feature `0004` extracted the shared engine + single-sourced templates into this repo; a new sibling is a `{ template + config + description }` instance, not a hand-encoded copy (the generator that automates this is feature `0005`).
+**Admission test for a new sibling:** coherent + closeable + backed by primary sources + non-overlapping with existing siblings. The rule of three (don't extract a shared pattern/generator until ≥3 siblings exist) is now **met and realized** — with three siblings built, the shared engine + single-sourced templates are now extracted into this repo; a new sibling is a `{ template + config + description }` instance, not a hand-encoded copy (a generator to automate that is planned).
 
 ## Naming convention
 
@@ -28,7 +28,7 @@ Ordered by **universality** — how many agent tasks the knowledge benefits. Uni
 | Sibling stem | Status | Scope | Boundary |
 |---|---|---|---|
 | **context-engineering** | built (14) | what occupies the window + long-context degradation (lost-in-the-middle, context-rot, distractors) + write/select/compress/isolate | the window now |
-| **prompt-engineering** | built (12, `0002-prompt-engineering-knowledge-base`) | composing the instruction: clarity & structure, few-shot exemplars, reasoning elicitation (CoT), output-format wording, prompt-level decomposition | wording vs the window |
+| **prompt-engineering** | built (12) | composing the instruction: clarity & structure, few-shot exemplars, reasoning elicitation (CoT), output-format wording, prompt-level decomposition | wording vs the window |
 
 ### Common — whenever you build or operate an agent
 | Sibling stem | Status | Scope | Boundary |
@@ -40,7 +40,7 @@ Ordered by **universality** — how many agent tasks the knowledge benefits. Uni
 ### Situational — only when the specific need arises (SKILL.md description-only discovery)
 | Sibling stem | Status | Scope | Boundary |
 |---|---|---|---|
-| **tool-design** | built (10, `0003-tool-design-knowledge-base`) | the tool/function contract — descriptions, input/output schemas, granularity & consolidation, naming/namespacing, high-signal & token-efficient returns, error design, structured output, tool evals; absorbs structured-output | the tool contract vs instruction-wording (prompt-engineering) & what occupies the window (context-engineering); tool surface vs how tools are sequenced (architectures) |
+| **tool-design** | built (10) | the tool/function contract — descriptions, input/output schemas, granularity & consolidation, naming/namespacing, high-signal & token-efficient returns, error design, structured output, tool evals; absorbs structured-output | the tool contract vs instruction-wording (prompt-engineering) & what occupies the window (context-engineering); tool surface vs how tools are sequenced (architectures) |
 | **skill-design** | planned · next build | the skill abstraction (SKILL.md) — progressive disclosure / three-tier token economics, directory packaging (scripts/references/assets), in-context activation, description-as-activation-trigger, one-capability granularity, instructions-body craft; the skill vs tool vs prompt vs sub-agent boundary | description/naming/selection-among-many delegated to tool-design (shared seam, single owner); the body's instruction-wording → prompt-engineering; sub-agent design → agent-architectures |
 | **memory-state** | planned | Cross-session persistence + recall — short/long-term, semantic/episodic/procedural, write/consolidation | *across windows* vs *this window* (context) |
 | **retrieval-rag** | planned | Fetch + rank external knowledge — chunking, embeddings, hybrid, rerank, contextual retrieval | *fetch* vs *place in window* (context) |

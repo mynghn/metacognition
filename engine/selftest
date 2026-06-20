@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""selftest — behavioral tests for kb-engine (feature 0004, tasks E1 + E2).
+"""selftest — behavioral tests for kb-engine.
 
 Each test encodes a behavior the engine must preserve, so this file is the durable home
 for the engine's WHYs (run it after any engine change):
 
-E1 parity (vs the legacy `*-kb` scripts):
+Parity (vs the legacy `*-kb` scripts):
   - valid capture writes the entry + a slug-sorted INDEX line (keeping section boilerplate);
   - INDEX stays slug-sorted across out-of-order captures;
   - capture refuses an existing slug; refresh refuses an absent one; refresh overwrites;
@@ -13,7 +13,7 @@ E1 parity (vs the legacy `*-kb` scripts):
   - CRLF input is accepted and normalized (legacy file-round-trip parity);
   - remove drops the entry file and its INDEX line.
 
-E2 (mutation -> vault repo):
+Mutation (-> the vault repo):
   - every capture / refresh / remove records EXACTLY ONE commit in the vault repo;
   - a rejected op records NO commit and leaves the tree unchanged;
   - the vault location resolves from $<PREFIX>_KB_VAULT / $KB_VAULT / default when --vault is omitted;
@@ -186,7 +186,7 @@ def main():
         check("locate exits 0", r.returncode == 0, r.stderr)
         check("locate prints vault + entry", vault in r.stdout and "alpha.md" in r.stdout)
 
-        # vault-location resolution when --vault is omitted (E2 / Decision-4)
+        # vault-location resolution when --vault is omitted
         clean = {k: v for k, v in os.environ.items() if k not in ("KB_VAULT", "CE_KB_VAULT")}
         r = run(cfg, None, ["locate"], env=dict(clean, KB_VAULT=vault))
         check("resolves $KB_VAULT", r.returncode == 0 and vault in r.stdout, r.stderr + r.stdout)
@@ -213,7 +213,7 @@ def main():
         finally:
             shutil.rmtree(v2, ignore_errors=True)
 
-        # SPEC#INV-1 guard: a vault dir NESTED inside an outer repo must be refused — never
+        # nested-vault guard: a vault dir NESTED inside an outer repo must be refused — never
         # commit the change into the enclosing (e.g. dotfiles) repo.
         outer = tempfile.mkdtemp(prefix="kb-outer-")
         try:
@@ -232,7 +232,7 @@ def main():
             n_outer = ncommits(outer)
             r = run(ncfg, nested, ["capture", "leak"], VALID_ENTRY.format(slug="leak"))
             check("nested-non-repo vault refused", r.returncode != 0 and "repo root" in r.stderr, r.stderr)
-            check("outer repo got NO commit (no INV-1 leak)", ncommits(outer) == n_outer)
+            check("outer repo got NO commit (no leak into the enclosing repo)", ncommits(outer) == n_outer)
             check("nested capture wrote no entry",
                   not os.path.isfile(os.path.join(nested, "test-topic", "knowledge", "leak.md")))
         finally:
