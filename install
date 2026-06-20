@@ -7,20 +7,24 @@ the SAME adapter into both `~/.claude/skills/<name>/` and `~/.codex/skills/<name
 plugin, no privileged agent, the two providers never diverge (DESIGN#Decision-2, Decision-8;
 SPEC#O-1, INV-3). Replaces the chezmoi `.chezmoitemplates` single-sourcing.
 
-Scope — feature 0004, tasks D1 + D2: render each sibling's adapter and deploy the byte-identical
-adapter to both providers (D1), and emit the tier-gated discovery wiring (D2) — the `description`
-into both adapters always, plus, for Everyday-tier siblings only, a named trigger block upserted
-into the shared `AGENTS.md` (which both `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` symlink to;
-`tier` comes from the per-sibling config). Recording the vault location + git-initialising the
-vault is task D3. The body's engine/config/vault paths are baked absolute at install time, so a
-rendered adapter is machine-specific while its source stays generic.
+Scope — feature 0004, tasks D1 + D2 + D3: render each sibling's adapter and deploy the
+byte-identical adapter to both providers (D1); emit the tier-gated discovery wiring (D2) — the
+`description` into both adapters always, plus, for Everyday-tier siblings only, a named trigger
+block upserted into the shared `AGENTS.md` (which both `~/.claude/CLAUDE.md` and
+`~/.codex/AGENTS.md` symlink to; `tier` comes from the per-sibling config); and set up the vault
+(D3) — ensure it is a git repo ROOT and record its location where the engine resolves it, so a
+clean clone-and-install needs no personal config. The body's engine/config/vault paths are baked
+absolute at install time, so a rendered adapter is machine-specific while its source stays generic.
 
 The AGENTS.md emission is SURGICAL: it inserts-or-replaces only its own named `<tag>...</tag>`
 span and leaves every other block (the user's operating instructions) byte-for-byte untouched,
 idempotent on re-run — it never rewrites the file. With the default `--dest ~` the shared file
 is the live `~/AGENTS.md`, which stays chezmoi-managed until B1 retires the blocks from the
 chezmoi source — so D1/D2 testing must pass `--dest <sandbox>`; the M2/B1 cutover owns the first
-live write (and may add a `--cutover` guard there).
+live write (and may add a `--cutover` guard there). D3's vault setup likewise writes a live file —
+`$XDG_CONFIG_HOME/llm-agent-knowledge-base/vault` (the real `~/.config` when XDG is unset) — and
+git-inits `--vault`; these are gated by `$XDG_CONFIG_HOME` / `--vault`, NOT `--dest`, so non-cutover
+testing must sandbox ALL THREE (`--dest`, `$XDG_CONFIG_HOME`, and a sandbox `--vault`).
 
 The install is ADDITIVE: it writes/overwrites the current siblings' adapters but does not prune
 adapters for removed/renamed siblings — retiring a stale adapter is the cutover's job (M2).
@@ -28,6 +32,7 @@ adapters for removed/renamed siblings — retiring a stale adapter is the cutove
 import argparse
 import os
 import re
+import subprocess
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_VAULT = "~/.local/share/llm-agent-knowledge-vault"
@@ -142,6 +147,51 @@ def upsert_agents_block(agents_path, block):
     return tag
 
 
+def config_home():
+    """The XDG config base — matched to the engine's own resolution so the location file the
+    installer writes is the one the engine reads (their contract). Honours $XDG_CONFIG_HOME so a
+    sandboxed install records to the sandbox, not the real ~/.config."""
+    return os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+
+
+def ensure_vault_repo(vault):
+    """Make the vault a git repo ROOT and return its absolute path. Creates the directory and
+    `git init`s it when absent — or when it sits INSIDE another repo (which would let a mutation
+    commit into that enclosing repo, the exact SPEC#INV-1 leak the engine refuses); a no-op when
+    it is already its own repo root, so a freshly-cloned vault is left untouched. Idempotent."""
+    if not vault or not vault.strip():
+        raise SystemExit("install: --vault must not be empty")
+    vault = os.path.abspath(os.path.expanduser(vault))
+    if os.path.isfile(vault):
+        raise SystemExit("install: vault path is a file, not a directory: %s" % vault)
+    try:
+        os.makedirs(vault, exist_ok=True)
+    except OSError as err:  # a dangling symlink in the way, an unwritable parent, …
+        raise SystemExit("install: cannot create the vault directory %s — %s" % (vault, err))
+    top = subprocess.run(["git", "-C", vault, "rev-parse", "--show-toplevel"],
+                         capture_output=True, text=True)
+    if top.returncode == 0 and os.path.realpath(top.stdout.strip()) == os.path.realpath(vault):
+        return vault  # already its own repo root (e.g. a clone) — leave it alone
+    r = subprocess.run(["git", "-C", vault, "init", "-q"], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise SystemExit("install: could not git-init the vault at %s — %s"
+                         % (vault, r.stderr.strip() or "git init failed"))
+    return vault
+
+
+def record_vault_location(vault):
+    """Write the engine<->installer contract file (DESIGN#Decision-4): the vault's absolute path
+    at $XDG_CONFIG_HOME/llm-agent-knowledge-base/vault, so the engine resolves the vault with no
+    --vault/env on a clean install. Writes only on change. Returns the file path."""
+    conf = os.path.join(config_home(), "llm-agent-knowledge-base", "vault")
+    content = os.path.abspath(os.path.expanduser(vault)) + "\n"
+    if not (os.path.isfile(conf) and open(conf, encoding="utf-8").read() == content):
+        os.makedirs(os.path.dirname(conf), exist_ok=True)
+        with open(conf, "w", encoding="utf-8") as fh:
+            fh.write(content)
+    return conf
+
+
 def siblings():
     """Sibling config files: skip the README, dotfiles (e.g. macOS .DS_Store), and any file
     that isn't a real config (no `stem`), so a stray file never derails the whole install."""
@@ -160,7 +210,8 @@ def main():
     p = argparse.ArgumentParser(description="Install the KB family into both agents.")
     p.add_argument("--dest", default="~", help="install prefix holding .claude/, .codex/, and the shared "
                    "AGENTS.md (default: ~ — the live chezmoi-managed file; pass a sandbox for D1/D2 testing)")
-    p.add_argument("--vault", default=DEFAULT_VAULT, help="vault repo path baked into adapters")
+    p.add_argument("--vault", default=DEFAULT_VAULT, help="vault repo path — baked into adapters, "
+                   "git-initialised as a repo root, and recorded for the engine (default: %s)" % DEFAULT_VAULT)
     p.add_argument("--only", help="install just this sibling (config/ stem or full skill name)")
     args = p.parse_args()
     dest = os.path.expanduser(args.dest)
@@ -181,6 +232,11 @@ def main():
         if block is not None:
             tag = upsert_agents_block(agents_path, block)
             print("install: AGENTS.md <%s> trigger block -> %s" % (tag, agents_path))
+
+    # D3: family-level vault setup, once per run (after the siblings render cleanly)
+    vault = ensure_vault_repo(args.vault)
+    conf = record_vault_location(vault)
+    print("install: vault -> %s  (recorded in %s)" % (vault, conf))
 
 
 if __name__ == "__main__":
