@@ -17,14 +17,23 @@ values, and SCAFFOLD the new sibling — authoring no knowledge. It writes:
     `## Seeds` section recording the topic's FAMILY primaries (before `## <index_heading>`
     so the engine's INDEX upsert preserves it), and an empty entries section.
   - `<vault>/<stem>/knowledge/`  — empty; the content build fills it later.
+  - `wiring/<stem>.agents.md`  — ONLY for an Everyday-tier sibling: a seed-and-flag DRAFT
+    trigger block (rendered from templates/agents-block.md) the installer needs to emit the
+    AGENTS.md block. The block prose has no registry source, so the body is an [AUTHOR] stub.
+    (Every planned sibling is Common/Situational, so this path is rarely hit in practice.)
 
-Then (G3) it invokes the installer to emit both adapters + tier-gated wiring. `--dry-run`
-derives + PREVIEWS without writing. The sibling is born scaffold-only: empty knowledge/,
-seeds recorded for the later content build, the description a seed-and-flag draft to refine
-before install. `generate` owns no structure of its own — the INDEX shape lives in
-templates/index-skeleton.md and the adapter shape in the installer; every value comes from
-the registry row or an explicit override. It does NOT commit the vault (the author reviews
-the drafts, then installs).
+Then it INVOKES the foundation installer (`install --only <stem>`) to emit both provider
+adapters + the tier-gated discovery wiring, leaving the sibling operable on the shared
+engine — it adds no operations or wiring of its own (INV-2). `--no-install` stops at the
+scaffold; `--dry-run` derives + PREVIEWS without writing.
+
+The sibling is born scaffold-only: empty knowledge/, seeds recorded for the later content
+build, and the description (+ any Everyday block) a seed-and-flag DRAFT — once installed it
+is LIVE in the adapter, so refine wiring/<stem> and re-run `install --only <stem>` before
+relying on the discovery trigger. `generate` owns no structure of its own — the INDEX shape
+lives in templates/index-skeleton.md, the block in templates/agents-block.md, the adapter in
+the installer; every value comes from the registry row or an explicit override. It does NOT
+commit the vault (the author reviews the drafts, then installs).
 
 What is mechanical vs. authored (verified against the three shipped siblings):
 
@@ -49,6 +58,7 @@ What is mechanical vs. authored (verified against the three shipped siblings):
 import argparse
 import os
 import re
+import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -269,6 +279,10 @@ def derive_config(inputs, args, config_dir):
         die("env_prefix %r (%s) collides with sibling %r — the installer does not validate "
             "this, so a duplicate would silently cross-wire their vault overrides. Choose a "
             "unique --env-prefix." % (env_prefix, how, owner))
+    if not args.env_prefix and len(env_prefix) == 1:
+        warn("env_prefix %r is a single character (auto-derived from a single-token stem) — the "
+             "engine reads $%s_KB_VAULT from the environment, so a 1-char prefix is collision-prone "
+             "with unrelated vars; pass an explicit --env-prefix if that's a concern." % (env_prefix, env_prefix))
     return {"stem": stem, "index_heading": index_heading, "env_prefix": env_prefix, "tier": tier}
 
 
@@ -374,6 +388,43 @@ def render_index_skeleton(config, inputs):
     return tpl
 
 
+def render_agents_block(config):
+    """Render templates/agents-block.md for an Everyday-tier sibling. The trigger prose has NO
+    registry source (like the description's "Use when …"), so the body is an [AUTHOR] stub; the
+    installer wraps it in the <stem> tag and upserts the AGENTS.md block."""
+    tpl = open(os.path.join(ROOT, "templates", "agents-block.md"), encoding="utf-8").read()
+    for token, value in (
+        ("@SKILL@", config["stem"] + "-knowledge-base"),
+        ("@TRIGGERS@", AUTHOR % "write the always-on activation triggers for this Everyday concern (no registry source)"),
+        ("@WHY@", AUTHOR % "write why the trigger is manual / what it guards (no registry source)"),
+    ):
+        tpl = tpl.replace(token, value)
+    return tpl
+
+
+def run_installer(stem, dest, vault):
+    """Invoke the foundation installer to emit both adapters + tier-gated wiring for the new
+    sibling, consuming the config/wiring just written. The generator adds no wiring of its own
+    (INV-2) — it delegates entirely to `install`.
+
+    Pre-creates --dest as a clean precondition: the installer's adapter-write paths are not
+    OSError-guarded, so a --dest under a non-directory would otherwise surface as a raw traceback
+    through this passthrough; failing here keeps the generator's clean-error contract."""
+    dest = os.path.expanduser(dest)
+    try:
+        os.makedirs(dest, exist_ok=True)
+    except OSError as e:
+        die("cannot use --dest %r: %s" % (dest, e.strerror or e))
+    r = subprocess.run([sys.executable, os.path.join(ROOT, "install"),
+                        "--only", stem, "--dest", dest, "--vault", vault],
+                       capture_output=True, text=True)
+    sys.stdout.write(r.stdout)
+    if r.stderr.strip():
+        sys.stderr.write(r.stderr)
+    if r.returncode != 0:
+        die("installer failed for %r (see above)" % stem)
+
+
 def resolve_vault(explicit):
     """Vault repo root: --vault, else the installer-recorded location, else the standard
     default — the engine/installer precedence minus the env hooks (irrelevant at scaffold)."""
@@ -405,10 +456,13 @@ def write_artifacts(inputs, config, description, vault, config_dir, wiring_dir, 
     topic = os.path.join(vault, stem)
     knowledge = os.path.join(topic, "knowledge")
     index = os.path.join(topic, "INDEX.md")
+    # Everyday tier alone needs a trigger-block file (the installer hard-requires it); other
+    # tiers are description-only.
+    block_path = os.path.join(wiring_dir, stem + ".agents.md") if config["tier"] == "everyday" else None
     if os.path.exists(vault) and not os.path.isdir(vault):
         die("vault path %r is not a directory" % vault)
 
-    clash = [p for p in (cfg_path, wir_path, index) if os.path.exists(p)]
+    clash = [p for p in (cfg_path, wir_path, index, block_path) if p and os.path.exists(p)]
     if clash and not force:
         die("refusing to overwrite an already-scaffolded sibling %r — exists: %s. --force "
             "rewrites config + wiring + INDEX, re-rendering the INDEX from the empty skeleton "
@@ -425,8 +479,10 @@ def write_artifacts(inputs, config, description, vault, config_dir, wiring_dir, 
         bodies = [(cfg_path, render_config_file(config)),
                   (wir_path, "description = %s\n" % description),
                   (index, render_index_skeleton(config, inputs))]
+        if block_path:
+            bodies.append((block_path, render_agents_block(config)))
     except OSError as e:
-        die("cannot render the scaffold (templates/index-skeleton.md): %s" % (e.strerror or e))
+        die("cannot render the scaffold (a template under templates/): %s" % (e.strerror or e))
     try:
         os.makedirs(config_dir, exist_ok=True)
         os.makedirs(wiring_dir, exist_ok=True)
@@ -436,7 +492,10 @@ def write_artifacts(inputs, config, description, vault, config_dir, wiring_dir, 
                 fh.write(body)
     except OSError as e:
         die("cannot write the scaffold: %s" % (e.strerror or e))
-    return {"config": cfg_path, "wiring": wir_path, "INDEX": index, "knowledge/": knowledge}
+    written = {"config": cfg_path, "wiring": wir_path, "INDEX": index, "knowledge/": knowledge}
+    if block_path:
+        written["wiring.agents.md"] = block_path
+    return written
 
 
 def report(inputs, stem, todos, mode):
@@ -445,7 +504,9 @@ def report(inputs, stem, todos, mode):
     if not inputs["in_registry"]:
         sys.stderr.write("generate: NOTE %r is not in the registry; derived from CLI overrides only.\n" % stem)
     if todos:
-        sys.stderr.write("generate: %d item(s) need authoring before install:\n" % len(todos))
+        when = ("now LIVE in the installed adapter — refine wiring/%s and re-run `install --only %s`"
+                % (stem, stem)) if "installed" in mode else "to author before install"
+        sys.stderr.write("generate: %d seed-and-flag draft(s) %s:\n" % (len(todos), when))
         for t in todos:
             sys.stderr.write("  - %s\n" % t)
 
@@ -478,6 +539,7 @@ def main(argv=None):
                    help="config/ dir — write target + env_prefix collision check")
     p.add_argument("--wiring-dir", default=os.path.join(ROOT, "wiring"), help="wiring/ dir — write target")
     p.add_argument("--vault", help="vault repo root (default: installer-recorded location, else %s)" % DEFAULT_VAULT)
+    p.add_argument("--dest", default="~", help="install prefix for the adapters + shared AGENTS.md (default: ~)")
     p.add_argument("--index-heading", help="INDEX section heading (default: Concepts)")
     p.add_argument("--env-prefix", help="<PREFIX>_KB_VAULT prefix (default: stem initials)")
     p.add_argument("--tier", help="everyday|common|situational (default: from FAMILY.md)")
@@ -486,6 +548,7 @@ def main(argv=None):
     p.add_argument("--noun", help="override the description's tail noun (default: from index_heading)")
     p.add_argument("--description", help="override the WHOLE description verbatim (escape hatch)")
     p.add_argument("--dry-run", action="store_true", help="derive + preview; write nothing")
+    p.add_argument("--no-install", action="store_true", help="stop at the scaffold; do not run the installer")
     p.add_argument("--force", action="store_true", help="overwrite an already-scaffolded sibling")
     args = p.parse_args(argv)
 
@@ -495,17 +558,28 @@ def main(argv=None):
     description, todos = derive_description(inputs, config, fam, args)
     if not inputs["seeds"]:
         todos.append("INDEX ## Seeds: [AUTHOR] no primary sources recorded in FAMILY.md")
+    if config["tier"] == "everyday":
+        todos.append("wiring/%s.agents.md trigger block: [AUTHOR] no registry source" % config["stem"])
     vault = resolve_vault(args.vault)
 
     if args.dry_run:
         preview(inputs, config, description, vault, todos)
         return 0
 
+    # The installer reads the tooling repo's own config/ + wiring/ (it has no path overrides), so
+    # a custom --config-dir/--wiring-dir is incompatible with installing — fail fast before writing.
+    real_cfg, real_wir = os.path.join(ROOT, "config"), os.path.join(ROOT, "wiring")
+    if not args.no_install and (os.path.abspath(args.config_dir) != real_cfg or os.path.abspath(args.wiring_dir) != real_wir):
+        die("the installer reads the tooling repo's config/ + wiring/ (%s), not a custom "
+            "--config-dir/--wiring-dir — scaffold with the defaults, or pass --no-install." % ROOT)
+
     written = write_artifacts(inputs, config, description, vault, args.config_dir, args.wiring_dir, args.force)
     sys.stdout.write("generate: scaffolded %s —\n" % config["stem"])
-    for k in ("config", "wiring", "INDEX", "knowledge/"):
-        sys.stdout.write("  %s: %s\n" % (k, written[k]))
-    report(inputs, config["stem"], todos, "scaffolded")
+    for k, v in written.items():
+        sys.stdout.write("  %s: %s\n" % (k, v))
+    if not args.no_install:
+        run_installer(config["stem"], args.dest, vault)
+    report(inputs, config["stem"], todos, "scaffolded" if args.no_install else "scaffolded + installed")
     return 0
 
 

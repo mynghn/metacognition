@@ -109,7 +109,7 @@ def main():
           "or looking up or saving an agent-architectures concept" in d)
     check("desc: neighbour parsed from Boundary cell", "(that is agent-runtime)" in d)
     check("desc: scope + neighbour glosses are [DRAFT] seeds", d.count("[DRAFT:") == 2, d)
-    check("desc: reports the authoring TODOs", "need authoring before install" in r.stderr)
+    check("desc: reports the authoring TODOs", "to author before install" in r.stderr, r.stderr)
 
     # tail noun is AUTHORED — default is only a guess; --noun yields CE's real "principle"
     r = run(["context-engineering", "--noun", "principle"])
@@ -171,7 +171,7 @@ def main():
     sb = tempfile.mkdtemp(prefix="kb-gen-g2-")
     try:
         cdir, wdir, vault = os.path.join(sb, "config"), os.path.join(sb, "wiring"), os.path.join(sb, "vault")
-        scaffold = ["agent-architectures", "--config-dir", cdir, "--wiring-dir", wdir, "--vault", vault]
+        scaffold = ["agent-architectures", "--config-dir", cdir, "--wiring-dir", wdir, "--vault", vault, "--no-install"]
         r = run_write(scaffold)
         topic = os.path.join(vault, "agent-architectures")
         cfg_f, wir_f = os.path.join(cdir, "agent-architectures"), os.path.join(wdir, "agent-architectures")
@@ -191,7 +191,7 @@ def main():
         # header byte-parity vs the shipped vault INDEX — the ONLY diff is the ## Seeds insert (O-5)
         if os.path.isfile(SHIPPED_INDEX):
             run_write(["context-engineering", "--config-dir", os.path.join(sb, "c2"),
-                       "--wiring-dir", os.path.join(sb, "w2"), "--vault", os.path.join(sb, "v2")])
+                       "--wiring-dir", os.path.join(sb, "w2"), "--vault", os.path.join(sb, "v2"), "--no-install"])
             gen_ce = open(os.path.join(sb, "v2", "context-engineering", "INDEX.md"), encoding="utf-8").read()
             shipped_full = open(SHIPPED_INDEX, encoding="utf-8").read()
             header = "\n".join(shipped_full.split("\n")[:7])  # H1 .. "Each line:"
@@ -244,12 +244,96 @@ def main():
         open(vf, "w").write("x")
         cf = os.path.join(sb, "cf")
         r = run_write(["evaluation-observability", "--config-dir", cf,
-                       "--wiring-dir", os.path.join(sb, "wf"), "--vault", vf])
+                       "--wiring-dir", os.path.join(sb, "wf"), "--vault", vf, "--no-install"])
         check("G2: --vault is a file -> clean error, no half-scaffold",
               r.returncode != 0 and "not a directory" in r.stderr and "Traceback" not in r.stderr
               and not os.path.exists(os.path.join(cf, "evaluation-observability")), r.stderr)
     finally:
         shutil.rmtree(sb, ignore_errors=True)
+
+    # ---- G3: generate invokes the installer -> both adapters + tier-gated wiring ----
+    # The installer reads the tooling repo's own config/ + wiring/ (no path overrides), so the
+    # temp siblings live there (removed in finally); adapters / AGENTS.md / vault go to a sandbox.
+    sb3 = tempfile.mkdtemp(prefix="kb-gen-g3-")
+    rwir = os.path.join(ROOT, "wiring")
+    temps = [os.path.join(CONFIG, "selftest-g3"), os.path.join(rwir, "selftest-g3"),
+             os.path.join(CONFIG, "selftest-g3e"), os.path.join(rwir, "selftest-g3e"),
+             os.path.join(rwir, "selftest-g3e.agents.md")]
+    try:
+        env = dict(os.environ, XDG_CONFIG_HOME=os.path.join(sb3, "xdg"))
+        for k in [k for k in list(env) if k == "KB_VAULT" or k.endswith("_KB_VAULT")]:
+            env.pop(k, None)
+        dest, vault = os.path.join(sb3, "dest"), os.path.join(sb3, "vault")
+        common = ["--config-dir", CONFIG, "--wiring-dir", rwir, "--vault", vault, "--dest", dest]
+
+        def gen(args):
+            return subprocess.run([sys.executable, GEN] + args, capture_output=True, text=True, env=env)
+
+        # situational sibling -> description-only; both adapters byte-identical; NO AGENTS.md block
+        r = gen(["selftest-g3", "--tier", "situational", "--env-prefix", "SG3",
+                 "--scope", "a probe scope", "--description", "A probe description for the g3 selftest."] + common)
+        name = "selftest-g3-knowledge-base"
+        c = os.path.join(dest, ".claude", "skills", name, "SKILL.md")
+        x = os.path.join(dest, ".codex", "skills", name, "SKILL.md")
+        check("G3: one run emits both adapters", r.returncode == 0 and os.path.isfile(c) and os.path.isfile(x), (r.stdout + r.stderr))
+        check("G3: Claude adapter == Codex adapter (byte-identical)",
+              os.path.isfile(c) and os.path.isfile(x) and open(c, encoding="utf-8").read() == open(x, encoding="utf-8").read())
+        check("G3: adapter carries the generated description",
+              os.path.isfile(c) and "A probe description for the g3 selftest." in open(c, encoding="utf-8").read())
+        check("G3: situational tier -> no AGENTS.md block", not os.path.isfile(os.path.join(dest, "AGENTS.md")))
+        # born-running: the engine resolves the installer-recorded vault (no --vault / env)
+        e = subprocess.run([sys.executable, ENGINE, "--config", os.path.join(CONFIG, "selftest-g3"), "locate"],
+                           capture_output=True, text=True, env=env)
+        check("G3: engine operates on the new sibling via the recorded vault",
+              e.returncode == 0 and os.path.abspath(vault) in e.stdout, (e.stdout + e.stderr))
+
+        # everyday sibling -> the generated draft .agents.md drives an AGENTS.md trigger block
+        r = gen(["selftest-g3e", "--tier", "everyday", "--env-prefix", "SE3",
+                 "--scope", "a probe", "--description", "A probe everyday description."] + common)
+        ag = os.path.join(dest, "AGENTS.md")
+        check("G3: everyday tier -> AGENTS.md trigger block emitted",
+              r.returncode == 0 and os.path.isfile(ag) and "<selftest_g3e>" in open(ag, encoding="utf-8").read(), (r.stdout + r.stderr))
+        check("G3: everyday sibling generated its draft .agents.md block",
+              os.path.isfile(os.path.join(rwir, "selftest-g3e.agents.md")))
+
+        # --no-install stops at the scaffold (installer never runs)
+        r = gen(["selftest-g3", "--tier", "situational", "--env-prefix", "SG3", "--scope", "x",
+                 "--description", "y", "--force", "--no-install"] + common)
+        check("G3: --no-install stops at scaffold (installer not run)",
+              r.returncode == 0 and "install:" not in r.stdout, (r.stdout + r.stderr))
+
+        # a custom --config-dir with install requested fails fast (installer reads the repo's config/)
+        r = gen(["selftest-g3", "--tier", "situational", "--env-prefix", "SG3", "--scope", "x",
+                 "--description", "y", "--config-dir", os.path.join(sb3, "custom")])
+        check("G3: custom --config-dir + install -> clean fail-fast",
+              r.returncode != 0 and "installer reads" in r.stderr and "Traceback" not in r.stderr, r.stderr)
+
+        # bad --dest (under a file) -> clean generate error, no installer traceback leak
+        badparent = os.path.join(sb3, "afile")
+        open(badparent, "w").write("x")
+        r = gen(["selftest-g3", "--tier", "situational", "--env-prefix", "SG3", "--scope", "x",
+                 "--description", "y", "--force", "--dest", os.path.join(badparent, "sub"),
+                 "--config-dir", CONFIG, "--wiring-dir", rwir, "--vault", vault])
+        check("G3: bad --dest -> clean error (no installer traceback)",
+              r.returncode != 0 and "--dest" in r.stderr and "Traceback" not in r.stderr, r.stderr)
+
+        # tier-gated overwrite clash message: everyday names the .agents.md draft; situational does not
+        noinst = ["--no-install", "--config-dir", CONFIG, "--wiring-dir", rwir, "--vault", vault]
+        r = gen(["selftest-g3e", "--tier", "everyday", "--env-prefix", "SE3", "--scope", "a", "--description", "d"] + noinst)
+        check("G3: everyday re-scaffold clash names the .agents.md draft",
+              r.returncode != 0 and "selftest-g3e.agents.md" in r.stderr, r.stderr)
+        r = gen(["selftest-g3", "--tier", "situational", "--env-prefix", "SG3", "--scope", "a", "--description", "d"] + noinst)
+        check("G3: situational re-scaffold clash does NOT name a .agents.md",
+              r.returncode != 0 and "agents.md" not in r.stderr, r.stderr)
+
+        # single-char auto-derived env_prefix (single-token stem) warns (collision-prone)
+        r = run(["redteamsolo", "--tier", "situational"])
+        check("G3: single-char auto env_prefix warns", "single character" in r.stderr, r.stderr)
+    finally:
+        for p in temps:
+            if os.path.exists(p):
+                os.remove(p)
+        shutil.rmtree(sb3, ignore_errors=True)
 
     passed, total = sum(_ok), len(_ok)
     print("\n%s: %d/%d checks passed" % ("PASS" if passed == total else "FAIL", passed, total))
