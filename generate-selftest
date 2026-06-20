@@ -1,0 +1,164 @@
+#!/usr/bin/env python3
+"""generate-selftest — derivation + guard tests for the sibling generator (G1 layer).
+
+Encodes the adversarial findings so they cannot regress:
+  - CONFIG PARITY (SPEC#INV-1): the derived config for each shipped sibling, given the right
+    --index-heading, reproduces config/<stem> BYTE-FOR-BYTE — and is exactly 4 fields, with
+    NO `noun` line (the installer computes @NOUN@ from index_heading; storing one diverges).
+  - env_prefix = stem initials, with a UNIQUENESS GUARD the installer lacks: a collision is a
+    CLEAN error (no traceback), resolvable with --env-prefix. (Near-miss: agent-architectures=AA
+    vs agent-runtime=AR.)
+  - index_heading has no registry source -> defaults to "Concepts" (SPEC#O-2: stem-only
+    yields a valid config), overridable.
+  - tier comes from the FAMILY.md section; an off-registry stem with no --tier is a clean error.
+  - DESCRIPTION is SEED-AND-FLAG, never fabricated on the auto-invoke path: mechanical opener +
+    "<a/an> <stem> <noun>" tail are filled; the no-source "Use when …" triggers are an [AUTHOR]
+    stub; scope + neighbour glosses are [DRAFT]; the whole thing is --description-overridable.
+  - the tail noun is an authored value (default noun_of(index_heading) is only a GUESS):
+    context-engineering ships "principle", not noun_of("Concepts")="concept" — so --noun must
+    override it. A generator that hard-derived the noun would mis-write CE's own description.
+  - a named neighbour absent from the registry is WARNED, not failed (the seam is a conceptual
+    family link the installer never checks; a typo must still surface).
+"""
+import os
+import subprocess
+import sys
+import tempfile
+
+ROOT = os.path.dirname(os.path.abspath(__file__))
+GEN = os.path.join(ROOT, "generate")
+CONFIG = os.path.join(ROOT, "config")
+CONFIG_KEYS = ("stem", "index_heading", "env_prefix", "tier")
+_ok = []
+
+
+def check(name, cond, detail=""):
+    _ok.append(bool(cond))
+    print("  %s %s%s" % ("PASS" if cond else "FAIL", name, ("  — " + detail) if detail and not cond else ""))
+
+
+def run(args):
+    return subprocess.run([sys.executable, GEN] + args, capture_output=True, text=True)
+
+
+def cfg_block(stdout):
+    """The 4 rendered config lines, in order — the would-be content of config/<stem>."""
+    return [ln for ln in stdout.splitlines() if ln.split(" = ", 1)[0] in CONFIG_KEYS]
+
+
+def desc_line(stdout):
+    for ln in stdout.splitlines():
+        if ln.startswith("description = "):
+            return ln[len("description = "):]
+    return ""
+
+
+def main():
+    # ---- config parity vs the three shipped siblings (INV-1) ----
+    parity = [("context-engineering", []),
+              ("prompt-engineering", ["--index-heading", "Techniques"]),
+              ("tool-design", ["--index-heading", "Practices"])]
+    for stem, flags in parity:
+        r = run([stem] + flags)
+        shipped = open(os.path.join(CONFIG, stem), encoding="utf-8").read().splitlines()
+        derived = cfg_block(r.stdout)
+        check("parity: %s derived == shipped config" % stem,
+              r.returncode == 0 and derived == shipped, "%r vs %r / %s" % (derived, shipped, r.stderr))
+        check("parity: %s config has no `noun` field" % stem, all("noun" != ln.split(" = ")[0] for ln in derived))
+
+    # ---- env_prefix derivation + the uniqueness guard the installer lacks ----
+    r = run(["agent-architectures"])
+    check("env_prefix: agent-architectures -> AA", "env_prefix = AA" in r.stdout, r.stdout)
+    check("index_heading: stem-only defaults to Concepts", "index_heading = Concepts" in r.stdout)
+    check("tier: agent-architectures -> common (from FAMILY section)", "tier = common" in r.stdout)
+
+    sb = tempfile.mkdtemp(prefix="kb-gen-sb-")
+    try:
+        with open(os.path.join(sb, "alpha-architecture"), "w", encoding="utf-8") as fh:
+            fh.write("stem = alpha-architecture\nindex_heading = X\nenv_prefix = AA\ntier = common\n")
+        r = run(["agent-architectures", "--config-dir", sb])
+        check("env_prefix collision: clean error (no traceback)",
+              r.returncode != 0 and "collides with sibling" in r.stderr and "Traceback" not in r.stderr, r.stderr)
+        r = run(["agent-architectures", "--config-dir", sb, "--env-prefix", "AX"])
+        check("env_prefix collision resolved by --env-prefix", r.returncode == 0 and "env_prefix = AX" in r.stdout, r.stderr)
+    finally:
+        for f in os.listdir(sb):
+            os.remove(os.path.join(sb, f))
+        os.rmdir(sb)
+
+    # ---- description: family shape + seed-and-flag, never fabricated ----
+    r = run(["agent-architectures"])
+    d = desc_line(r.stdout)
+    check("desc: verb-triad opener",
+          d.startswith("Retrieve, capture, or refresh distilled agent-architectures knowledge —"))
+    check("desc: 'Use when' triggers are an [AUTHOR] stub (not fabricated)",
+          "Use when [AUTHOR:" in d)
+    check("desc: mechanical tail with correct article + noun guess",
+          "or looking up or saving an agent-architectures concept" in d)
+    check("desc: neighbour parsed from Boundary cell", "(that is agent-runtime)" in d)
+    check("desc: scope + neighbour glosses are [DRAFT] seeds", d.count("[DRAFT:") == 2, d)
+    check("desc: reports the authoring TODOs", "need authoring before install" in r.stderr)
+
+    # tail noun is AUTHORED — default is only a guess; --noun yields CE's real "principle"
+    r = run(["context-engineering", "--noun", "principle"])
+    check("desc: --noun overrides the tail (CE ships 'principle', not noun_of('Concepts'))",
+          "or looking up or saving a context-engineering principle" in desc_line(r.stdout))
+
+    # whole-description escape hatch: verbatim, zero TODOs
+    r = run(["agent-architectures", "--description", "Custom verbatim."])
+    check("desc: --description is verbatim with no TODOs",
+          desc_line(r.stdout) == "Custom verbatim." and "need authoring" not in r.stderr)
+
+    # ---- clean errors + neighbour-typo warning ----
+    r = run(["Not_A_Stem"])
+    check("bad stem: clean error", r.returncode != 0 and "kebab-case" in r.stderr and "Traceback" not in r.stderr)
+    r = run(["brand-new-topic"])
+    check("off-registry stem w/o --tier: clean error",
+          r.returncode != 0 and "not in the registry" in r.stderr and "Traceback" not in r.stderr)
+    r = run(["agent-architectures", "--boundary", "control flow vs sequencing (architectures)"])
+    check("unknown neighbour: warned, not failed",
+          r.returncode == 0 and "not a known FAMILY stem" in r.stderr and "(that is architectures)" in desc_line(r.stdout), r.stderr)
+
+    # ---- regression guards (red-team findings; these rows/paths were never exercised) ----
+
+    # skill-design's Boundary cell names neighbours in arrow-prose, not parens, AND carries an
+    # editorial paren aside "(shared seam, single owner)". The parser must surface the THREE real
+    # neighbours and NOT fabricate the aside as a phantom sibling.
+    d = desc_line(run(["skill-design"]).stdout)
+    for n in ("tool-design", "prompt-engineering", "agent-architectures"):
+        check("skill-design: real neighbour %s surfaced" % n, "(that is %s)" % n in d, d)
+    check("skill-design: editorial paren aside NOT fabricated as a neighbour",
+          "shared seam" not in d and "(that is shared" not in d, d)
+
+    # the env_prefix guard must fire on the EXPLICIT --env-prefix branch too (the escape path the
+    # auto-derived error recommends), not only on the auto-derived branch.
+    sb2 = tempfile.mkdtemp(prefix="kb-gen-sb-")
+    try:
+        with open(os.path.join(sb2, "other-sibling"), "w", encoding="utf-8") as fh:
+            fh.write("stem = other-sibling\nindex_heading = X\nenv_prefix = ZZ\ntier = common\n")
+        r = run(["agent-architectures", "--config-dir", sb2, "--env-prefix", "ZZ"])
+        check("env_prefix: explicit --env-prefix collision is also a clean error",
+              r.returncode != 0 and "collides with sibling" in r.stderr and "Traceback" not in r.stderr, r.stderr)
+    finally:
+        for f in os.listdir(sb2):
+            os.remove(os.path.join(sb2, f))
+        os.rmdir(sb2)
+
+    # strict kebab: trailing / double hyphens reach STEM_RE and die kebab-case; a leading hyphen
+    # reaches STEM_RE only past argparse's `--` end-of-options separator (a bare `-foo` is an
+    # argparse usage error first — also a rejection, just a different layer). All would otherwise
+    # reach install's skill name + vault folder malformed.
+    for bad in ("foo-", "foo--bar"):
+        r = run([bad, "--tier", "common"])
+        check("strict stem rejects %r" % bad, r.returncode != 0 and "kebab-case" in r.stderr, r.stderr)
+    r = run(["--tier", "common", "--", "-foo"])
+    check("strict stem rejects '-foo' (via STEM_RE past `--`)",
+          r.returncode != 0 and "kebab-case" in r.stderr, r.stderr)
+
+    passed, total = sum(_ok), len(_ok)
+    print("\n%s: %d/%d checks passed" % ("PASS" if passed == total else "FAIL", passed, total))
+    return 0 if passed == total else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
