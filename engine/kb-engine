@@ -283,7 +283,8 @@ def write_entry(verb, vault, cfg, slug):
         fh.write(body)
     _upsert_index(idx, lines, h, slug, desc)
     sha = commit_change(vault, cfg, slug, verb)
-    sys.stdout.write("%s: %sd %s (%s)\n" % (PROG, verb, slug, sha))
+    past = verb + ("d" if verb.endswith("e") else "ed")  # capture->captured, refresh->refreshed
+    sys.stdout.write("%s: %s %s (%s)\n" % (PROG, past, slug, sha))
 
 
 def remove_entry(vault, cfg, slug):
