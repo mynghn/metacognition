@@ -1,0 +1,376 @@
+#!/usr/bin/env python3
+"""generate — scaffold a new Metacognition sibling from the family registry.
+
+[G1 — input/derivation layer] Given a topic stem (+ optional CLI overrides), read
+`FAMILY.md` and DERIVE the two tooling-repo artifacts the installer consumes:
+
+  - `config/<stem>`  — the live 4-field per-sibling config { stem, index_heading,
+    env_prefix, tier } (schema: templates/sibling-config.schema.md). There is NO `noun`
+    field: the installer COMPUTES @NOUN@ from `index_heading` at render time
+    (`install.noun_of`), so writing a `noun =` line would diverge from every shipped
+    sibling and be ignored. (The 0005 design's 5-field "{…, noun, …}" wording predates
+    the 0004 schema; reality wins.)
+  - `wiring/<stem>`  — the single `description = …` discovery line, in the family shape:
+    verb-triad opener + scope gloss + "Use when …" + bidirectional "not when … (that is
+    <neighbor>)".
+
+This layer DERIVES and PREVIEWS only — it writes no files and authors no knowledge. The
+sibling is born scaffold-only; G2 instantiates the skeleton + seed record from the
+foundation templates and G3 invokes the installer. `generate` owns no structure of its
+own: every value comes from the registry row or an explicit override.
+
+What is mechanical vs. authored (verified against the three shipped siblings):
+
+  - `stem` / `tier` / `env_prefix` are cleanly derivable from the FAMILY row — env_prefix
+    is the uppercased initials of the hyphen-split stem (context-engineering -> CE). The
+    installer NEVER validates env_prefix, so a duplicate would silently cross-wire two
+    siblings' <PREFIX>_KB_VAULT vault override; we refuse a collision HERE, the last place
+    it can still be caught (the initials rule has a live near-miss: agent-architectures=AA
+    vs agent-runtime=AR).
+  - `index_heading` has NO registry source and is not stem-derivable (the shipped
+    Concepts / Techniques / Practices are editorial taxonomy). It defaults to "Concepts",
+    overridable with --index-heading.
+  - the description's scope gloss, "Use when …" triggers, and neighbor glosses have NO
+    faithful registry source — a deterministic transform of the terse Scope/Boundary
+    columns would fabricate unauthored prose straight onto the auto-invoke discovery path
+    (e.g. context-engineering's Boundary cell names zero neighbors yet its description names
+    two; its tail noun is "principle", not noun_of("Concepts")="concept"). So we emit a
+    SEED-AND-FLAG draft: mechanical parts filled, registry-seeded parts marked `[DRAFT: …]`,
+    and the no-source "Use when …" triggers marked `[AUTHOR: …]` — never silently invented.
+    The whole description is overridable with --description.
+"""
+import argparse
+import os
+import re
+import sys
+
+ROOT = os.path.dirname(os.path.abspath(__file__))
+TIERS = ("everyday", "common", "situational")
+EMDASH = "—"
+SEP = " %s " % EMDASH  # the " — " field separator FAMILY.md uses in seed lines / scope cells
+STEM_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")  # strict kebab: no leading/trailing/double hyphen
+
+
+def die(msg):
+    sys.stderr.write("generate: %s\n" % msg)
+    raise SystemExit(1)
+
+
+def warn(msg):
+    sys.stderr.write("generate: %s\n" % msg)
+
+
+def parse_kv(path):
+    """Parse a flat `key = value` file (the foundation's config/wiring format)."""
+    cfg = {}
+    with open(path, encoding="utf-8") as fh:
+        for raw in fh:
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            cfg[k.strip()] = v.strip()
+    return cfg
+
+
+# ---- registry (FAMILY.md) ----------------------------------------------------
+
+def parse_family(path):
+    """Read FAMILY.md into { stem: {tier, scope, boundary, neighbors, seeds} }.
+
+    The three tier tables (Everyday / Common / Situational) carry the per-sibling
+    stem/scope/boundary rows; the tier is the `###` section header the row sits under.
+    Seeds come from the "Per-topic primaries" shelf. Only rows under a recognised tier
+    header are siblings — bullet sections (Excluded, Boundary rulings, …) are skipped.
+    """
+    if not os.path.isfile(path):
+        die("registry not found: %s" % path)
+    fam = {}
+    tier = None
+    in_primaries = False
+    with open(path, encoding="utf-8") as fh:
+        lines = fh.readlines()
+    for raw in lines:
+        line = raw.rstrip("\n")
+        s = line.strip()
+        # tier section gate
+        m = re.match(r"^###\s+(Everyday|Common|Situational)\b", s)
+        if m:
+            tier = m.group(1).lower()
+            continue
+        if s.startswith("#"):
+            tier = None  # any other heading closes the current tier table
+        # family table rows
+        if tier and s.startswith("|"):
+            cells = [c.strip() for c in s.strip("|").split("|")]
+            if len(cells) < 4:
+                continue
+            if cells[0].startswith("Sibling stem") or re.match(r"^:?-+:?$", cells[0]):
+                continue
+            bold = re.search(r"\*\*([^*]+)\*\*", cells[0])
+            stem = (bold.group(1) if bold else cells[0]).strip()
+            if not STEM_RE.match(stem):
+                continue
+            fam[stem] = {
+                "tier": tier,
+                "scope": cells[2],
+                "boundary": cells[3],
+                "neighbors": _neighbors_of(cells[3]),
+                "seeds": [],
+            }
+        # per-topic seed shelf
+        if s.startswith("Per-topic primaries"):
+            in_primaries = True
+            continue
+        if in_primaries:
+            if s.startswith("##") or s.startswith("Loop vocabulary") or s.startswith("Standard:"):
+                in_primaries = False
+            elif s.startswith("- ") and SEP in s:
+                parts = s[2:].split(SEP)
+                key = parts[0].split(" / ")[0].strip()  # "agent-runtime / harness" -> "agent-runtime"
+                if key in fam:
+                    fam[key]["seeds"].append(SEP.join(parts[1:]).strip())
+    return fam
+
+
+# A neighbour is a kebab single-token named one of three ways in a Boundary cell. The
+# single-token `(…)` match is load-bearing: a multi-word parenthetical like
+# "(shared seam, single owner)" is an editorial ASIDE, not a sibling — matching only
+# `([a-z0-9-]+)` excludes it (so we never fabricate a phantom neighbour), while the arrow /
+# "delegated to" forms recover names that live in prose, not parens (skill-design's row).
+_NEIGHBOR_RE = re.compile(r"\(([a-z0-9-]+)\)|→\s*([a-z0-9-]+)|delegated to\s+([a-z0-9-]+)")
+
+
+def _neighbors_of(boundary_cell):
+    """The neighbour sibling stems a Boundary cell names, in document order.
+
+    Editorial, not exhaustive: a cell may name zero (context-engineering's "the window
+    now") or a shorthand ("(architectures)"); resolution against real stems happens at
+    description time, where an unknown name is warned, not failed.
+    """
+    out = []
+    for m in _NEIGHBOR_RE.finditer(boundary_cell):
+        tok = next(g for g in m.groups() if g)
+        if tok not in out:
+            out.append(tok)
+    return out
+
+
+# ---- derivation --------------------------------------------------------------
+
+def env_prefix_of(stem):
+    """Uppercased initials of the hyphen-split stem (context-engineering -> CE)."""
+    return "".join(w[0] for w in stem.split("-") if w).upper()
+
+
+def noun_of(index_heading):
+    """Singularise the INDEX heading for the @NOUN@ slot — mirrors install.noun_of so the
+    derived guess matches what the installer will render (Concepts -> concept)."""
+    h = index_heading.strip().lower()
+    return h[:-1] if h.endswith("s") else h
+
+
+def article(word):
+    return "an" if word[:1].lower() in "aeiou" else "a"
+
+
+def existing_env_prefixes(config_dir, exclude_stem):
+    """{ env_prefix: owning-stem } across config/*, excluding the target stem's own file
+    (so re-generating an existing sibling does not collide with itself)."""
+    out = {}
+    if not os.path.isdir(config_dir):
+        return out
+    for f in sorted(os.listdir(config_dir)):
+        p = os.path.join(config_dir, f)
+        if f.startswith(".") or f == "README.md" or not os.path.isfile(p):
+            continue
+        cfg = parse_kv(p)
+        st, pre = cfg.get("stem"), cfg.get("env_prefix")
+        if st and pre and st != exclude_stem:
+            out[pre] = st
+    return out
+
+
+def resolve_inputs(stem, fam, args):
+    """Merge the FAMILY row for `stem` with CLI overrides into the input model.
+
+    A stem present in the registry needs no flags (SPEC#O-2: stem-only suffices); an
+    off-registry stem must supply at least --tier (and ideally --scope/--boundary) so the
+    derivation has something to work from.
+    """
+    if not STEM_RE.match(stem):
+        die("stem %r is not kebab-case (a-z 0-9 -)" % stem)
+    row = fam.get(stem)
+    if row is None and not args.tier:
+        die("stem %r is not in the registry (%s) and no --tier was given; pass --tier "
+            "(and --scope/--boundary) to scaffold an off-registry sibling, or fix the stem"
+            % (stem, os.path.relpath(args.family, ROOT)))
+    row = row or {"tier": None, "scope": "", "boundary": "", "neighbors": [], "seeds": []}
+    return {
+        "stem": stem,
+        "tier": (args.tier or row["tier"] or "").strip().lower(),
+        "scope": args.scope if args.scope is not None else row["scope"],
+        "boundary": args.boundary if args.boundary is not None else row["boundary"],
+        "neighbors": _neighbors_of(args.boundary) if args.boundary is not None else row["neighbors"],
+        "seeds": row["seeds"],
+        "in_registry": stem in fam,
+    }
+
+
+def derive_config(inputs, args, config_dir):
+    """The live 4-field config dict. Order matches the shipped files."""
+    stem = inputs["stem"]
+    tier = inputs["tier"]
+    if tier not in TIERS:
+        die("tier for %r is %r — must be one of %s (set it in FAMILY.md or pass --tier)"
+            % (stem, tier or "(none)", ", ".join(TIERS)))
+    index_heading = (args.index_heading or "Concepts").strip()
+    # Uniqueness is checked on BOTH branches: --env-prefix is the exact escape the
+    # auto-derived collision error tells authors to take, so it must be guarded too — else
+    # an author resolving one collision could silently pick another taken prefix. The
+    # installer validates env_prefix nowhere, so this is the last line of defence.
+    env_prefix = (args.env_prefix or env_prefix_of(stem)).strip()
+    owner = existing_env_prefixes(config_dir, exclude_stem=stem).get(env_prefix)
+    if owner:
+        how = "passed via --env-prefix" if args.env_prefix else "auto-derived from %r" % stem
+        die("env_prefix %r (%s) collides with sibling %r — the installer does not validate "
+            "this, so a duplicate would silently cross-wire their vault overrides. Choose a "
+            "unique --env-prefix." % (env_prefix, how, owner))
+    return {"stem": stem, "index_heading": index_heading, "env_prefix": env_prefix, "tier": tier}
+
+
+# Draft markers — make the non-authored regions of the description unmistakable so they are
+# never mistaken for finished discovery-trigger prose (and are trivially greppable).
+DRAFT = "[DRAFT: %s]"      # registry-seeded; refine the prose before install
+AUTHOR = "[AUTHOR: %s]"    # no registry source; the author must write this
+
+
+def derive_description(inputs, config, fam, args):
+    """The family-shaped `description` string + a list of authoring TODOs.
+
+    Returns (description, todos). With --description the whole string is taken verbatim
+    (the escape hatch) and todos is empty. Otherwise a SEED-AND-FLAG draft: S1 opener and
+    the "looking up or saving a <stem> <noun>" tail are mechanical; the scope gloss and
+    neighbour glosses are registry-seeded `[DRAFT: …]`; the "Use when …" triggers, which
+    have no registry source, are an `[AUTHOR: …]` stub. Never fabricates trigger prose.
+    """
+    if args.description is not None:
+        return args.description.strip(), []
+
+    stem = inputs["stem"]
+    todos = []
+
+    opener = "Retrieve, capture, or refresh distilled %s knowledge" % stem
+
+    if inputs["scope"]:
+        scope_slot = DRAFT % ("refine — " + inputs["scope"])
+        todos.append("description scope gloss: [DRAFT] registry-seeded; refine the prose")
+    else:
+        scope_slot = AUTHOR % "write the scope gloss (no registry source)"
+        todos.append("description scope gloss: [AUTHOR] no registry source")
+
+    triggers = AUTHOR % 'write the "Use when …" discovery triggers (no registry source)'
+    todos.append('description "Use when …" triggers: [AUTHOR] no registry source')
+
+    noun = (args.noun or noun_of(config["index_heading"])).strip()
+    tail = "or looking up or saving %s %s %s" % (article(stem), stem, noun)
+
+    boundary_slot = _boundary_clause(inputs, fam, todos)
+
+    # Family shape: "<opener> — <scope>. Use when <triggers>, <tail><boundary>."
+    # boundary_slot carries its own leading " — " (or is empty-ish for the author stub).
+    description = "%s %s %s. Use when %s, %s%s." % (
+        opener, EMDASH, scope_slot, triggers, tail, boundary_slot)
+    return description, todos
+
+
+def _boundary_clause(inputs, fam, todos):
+    """The bidirectional `— not when <gloss> (that is <neighbor>)` clause, seeded from each
+    neighbour's own FAMILY Scope cell. A named neighbour absent from the registry is kept
+    (the seam is a conceptual family link, not a live dependency — the installer never
+    checks it) but warned, since a typo would otherwise reach the live description."""
+    neighbors = inputs["neighbors"]
+    if not neighbors:
+        todos.append("description boundary clause: [AUTHOR] name the neighbour sibling(s)")
+        return " " + EMDASH + " " + (AUTHOR % "name the boundary neighbour(s): not when … (that is <neighbor>)")
+    parts = []
+    for n in neighbors:
+        nrow = fam.get(n)
+        if nrow and nrow["scope"]:
+            gloss = DRAFT % ("refine — " + nrow["scope"])
+        else:
+            gloss = AUTHOR % ("gloss the boundary vs %s" % n)
+            if not nrow:
+                warn("neighbour %r is not a known FAMILY stem (typo or shorthand?) — verify before install" % n)
+        parts.append((gloss, n))
+    todos.append("description neighbour gloss(es): [DRAFT] registry-seeded; refine the prose")
+    out = " " + EMDASH + " not when %s (that is %s)" % (parts[0][0], parts[0][1])
+    for gloss, n in parts[1:]:
+        out += ", nor when %s (that is %s)" % (gloss, n)
+    return out
+
+
+# ---- CLI ---------------------------------------------------------------------
+
+def render_config_file(config):
+    return "".join("%s = %s\n" % (k, config[k]) for k in ("stem", "index_heading", "env_prefix", "tier"))
+
+
+def preview(inputs, config, description, todos):
+    """Print the two artifacts exactly as they would be written, plus seeds + TODOs.
+
+    Stdout is the would-be file content (diffable / copy-pasteable); stderr carries the
+    authoring TODOs and any warnings.
+    """
+    stem = inputs["stem"]
+    out = []
+    out.append("# config/%s" % stem)
+    out.append(render_config_file(config).rstrip("\n"))
+    out.append("")
+    out.append("# wiring/%s" % stem)
+    out.append("description = %s" % description)
+    out.append("")
+    out.append("# seeds (read from FAMILY.md; recorded into the vault by G2, not here):")
+    if inputs["seeds"]:
+        for sd in inputs["seeds"]:
+            out.append("#   - %s" % sd)
+    else:
+        out.append("#   (none in the registry for this stem)")
+    sys.stdout.write("\n".join(out) + "\n")
+
+    sys.stderr.write("\ngenerate: %s previewed — no files written (G1 derivation layer).\n" % stem)
+    if not inputs["in_registry"]:
+        sys.stderr.write("generate: NOTE %r is not in the registry; derived from CLI overrides only.\n" % stem)
+    if todos:
+        sys.stderr.write("generate: %d item(s) need authoring before install:\n" % len(todos))
+        for t in todos:
+            sys.stderr.write("  - %s\n" % t)
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(
+        description="Derive a new Metacognition sibling's config + discovery description "
+                    "from the family registry (FAMILY.md). Previews only; writes no files.")
+    p.add_argument("stem", help="topic stem (a FAMILY.md row; e.g. agent-architectures)")
+    p.add_argument("--family", default=os.path.join(ROOT, "FAMILY.md"), help="registry path")
+    p.add_argument("--config-dir", default=os.path.join(ROOT, "config"),
+                   help="existing configs, for the env_prefix collision check")
+    p.add_argument("--index-heading", help="INDEX section heading (default: Concepts)")
+    p.add_argument("--env-prefix", help="<PREFIX>_KB_VAULT prefix (default: stem initials)")
+    p.add_argument("--tier", help="everyday|common|situational (default: from FAMILY.md)")
+    p.add_argument("--scope", help="override the scope-gloss seed")
+    p.add_argument("--boundary", help="override the Boundary cell used for neighbour parsing")
+    p.add_argument("--noun", help="override the description's tail noun (default: from index_heading)")
+    p.add_argument("--description", help="override the WHOLE description verbatim (escape hatch)")
+    args = p.parse_args(argv)
+
+    fam = parse_family(args.family)
+    inputs = resolve_inputs(args.stem, fam, args)
+    config = derive_config(inputs, args, args.config_dir)
+    description, todos = derive_description(inputs, config, fam, args)
+    preview(inputs, config, description, todos)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
