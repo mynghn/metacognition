@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
-"""install-selftest — robustness + idempotency tests for the installer (feature 0004, D1).
+"""install-selftest — robustness + idempotency tests for the installer (feature 0004, D1 + D2).
 
 Encodes the adversarial findings so they cannot regress: byte-identical Claude/Codex adapters,
 idempotent re-run, stray/dotfiles in config/ skipped (not mis-treated as siblings), and CLEAN
 errors (no Python tracebacks) for an unknown --only / a config missing a required field / a
 sibling with no discovery description.
+
+D2 (tier-gated AGENTS.md trigger blocks): an Everyday-tier sibling gets its named block emitted
+byte-exact into the shared AGENTS.md; a Situational sibling gets none; the upsert is SURGICAL
+(replaces only its own <tag>...</tag> span, preserves every other block) and idempotent; and a
+tier=everyday sibling missing its block file is a clean error.
 """
 import os
 import shutil
@@ -91,6 +96,142 @@ def main():
                   r.returncode != 0 and "discovery description" in r.stderr and "Traceback" not in r.stderr, r.stderr)
         finally:
             os.remove(nw)
+
+        # ---- D2: tier-gated AGENTS.md trigger-block emission ----
+        def expected_block(stem):
+            body = open(os.path.join(ROOT, "wiring", stem + ".agents.md"), encoding="utf-8").read()
+            tag = stem.replace("-", "_")
+            return "<%s>\n%s</%s>" % (tag, body, tag)
+
+        CE = expected_block("context-engineering")
+        PE = expected_block("prompt-engineering")
+
+        # everyday siblings -> block emitted byte-exact into the shared AGENTS.md; idempotent
+        d_ev = tempfile.mkdtemp(prefix="kb-install-")
+        try:
+            run(["--dest", d_ev])
+            ag = os.path.join(d_ev, "AGENTS.md")
+            txt = open(ag, encoding="utf-8").read() if os.path.isfile(ag) else ""
+            check("everyday: AGENTS.md created", os.path.isfile(ag))
+            check("everyday: CE block byte-exact", CE in txt)
+            check("everyday: PE block byte-exact", PE in txt)
+            check("everyday: no situational block", "<tool_design>" not in txt)
+            run(["--dest", d_ev])
+            check("AGENTS.md idempotent re-run", os.path.isfile(ag) and open(ag, encoding="utf-8").read() == txt)
+        finally:
+            shutil.rmtree(d_ev, ignore_errors=True)
+
+        # situational-only target writes NO AGENTS.md at all
+        d_sit = tempfile.mkdtemp(prefix="kb-install-")
+        try:
+            run(["--dest", d_sit, "--only", "tool-design"])
+            check("situational --only: no AGENTS.md", not os.path.isfile(os.path.join(d_sit, "AGENTS.md")))
+        finally:
+            shutil.rmtree(d_sit, ignore_errors=True)
+
+        # --only an everyday sibling emits ONLY that block
+        d_one = tempfile.mkdtemp(prefix="kb-install-")
+        try:
+            run(["--dest", d_one, "--only", "context-engineering"])
+            txt = open(os.path.join(d_one, "AGENTS.md"), encoding="utf-8").read()
+            check("--only CE: CE block present", CE in txt)
+            check("--only CE: PE block absent", "<prompt_engineering>" not in txt)
+        finally:
+            shutil.rmtree(d_one, ignore_errors=True)
+
+        # surgical upsert: replace the named block in place, leave every other span untouched
+        d_surg = tempfile.mkdtemp(prefix="kb-install-")
+        try:
+            ag = os.path.join(d_surg, "AGENTS.md")
+            open(ag, "w", encoding="utf-8").write(
+                "<user_sentinel>\nhand-written, must survive\n</user_sentinel>\n\n"
+                "<context_engineering>\nSTALE BODY\n</context_engineering>\n\n"
+                "<closing_sentinel>\nalso keep\n</closing_sentinel>\n")
+            run(["--dest", d_surg, "--only", "context-engineering"])
+            out = open(ag, encoding="utf-8").read()
+            check("surgical: leading user block preserved", "<user_sentinel>\nhand-written, must survive\n</user_sentinel>" in out)
+            check("surgical: trailing user block preserved", "<closing_sentinel>\nalso keep\n</closing_sentinel>" in out)
+            check("surgical: stale block replaced by canonical", CE in out and "STALE BODY" not in out)
+            check("surgical: block replaced in place (not appended)",
+                  out.index("<context_engineering>") < out.index("<closing_sentinel>"))
+        finally:
+            shutil.rmtree(d_surg, ignore_errors=True)
+
+        # surgical upsert must NOT swallow a neighbour block that merely MENTIONS the tag inline
+        d_p8 = tempfile.mkdtemp(prefix="kb-install-")
+        try:
+            ag = os.path.join(d_p8, "AGENTS.md")
+            open(ag, "w", encoding="utf-8").write(
+                "<note>\nSee the <context_engineering> idea inline.\n</note>\n\n"
+                "<context_engineering>\nSTALE\n</context_engineering>\n")
+            run(["--dest", d_p8, "--only", "context-engineering"])
+            out = open(ag, encoding="utf-8").read()
+            check("inline tag mention: neighbour block intact",
+                  "<note>\nSee the <context_engineering> idea inline.\n</note>" in out)
+            check("inline tag mention: real block still replaced", CE in out and "STALE" not in out)
+        finally:
+            shutil.rmtree(d_p8, ignore_errors=True)
+
+        # a body that embeds its own closing tag -> clean error (would otherwise break idempotency)
+        bc = os.path.join(CONFIG, "_selftest_badbody")
+        wbc = os.path.join(ROOT, "wiring", "_selftest_badbody")
+        wbcb = os.path.join(ROOT, "wiring", "_selftest_badbody.agents.md")
+        open(bc, "w").write("stem = _selftest_badbody\nindex_heading = X\ntier = everyday\n")
+        open(wbc, "w").write("description = probe\n")
+        open(wbcb, "w").write("hello </_selftest_badbody> world\n")
+        try:
+            r = run(["--dest", dest, "--only", "_selftest_badbody"])
+            check("body with embedded close tag: clean error",
+                  r.returncode != 0 and "closing tag" in r.stderr and "Traceback" not in r.stderr, r.stderr)
+        finally:
+            os.remove(bc)
+            os.remove(wbc)
+            os.remove(wbcb)
+
+        # a body's trailing-newline shape is normalised to exactly one
+        d_nl = tempfile.mkdtemp(prefix="kb-install-")
+        nlc = os.path.join(CONFIG, "_selftest_nl")
+        wnl = os.path.join(ROOT, "wiring", "_selftest_nl")
+        wnlb = os.path.join(ROOT, "wiring", "_selftest_nl.agents.md")
+        open(nlc, "w").write("stem = _selftest_nl\nindex_heading = X\ntier = everyday\n")
+        open(wnl, "w").write("description = probe\n")
+        open(wnlb, "w").write("LINE ONE\nLINE TWO\n\n\n")  # 3 trailing newlines
+        try:
+            run(["--dest", d_nl, "--only", "_selftest_nl"])
+            out = open(os.path.join(d_nl, "AGENTS.md"), encoding="utf-8").read()
+            check("body trailing-newlines normalised to one",
+                  "<_selftest_nl>\nLINE ONE\nLINE TWO\n</_selftest_nl>" in out)
+        finally:
+            os.remove(nlc)
+            os.remove(wnl)
+            os.remove(wnlb)
+            shutil.rmtree(d_nl, ignore_errors=True)
+
+        # a typo'd tier -> clean error (never silently drop an Everyday block)
+        tt = os.path.join(CONFIG, "_selftest_tier_typo")
+        wtt = os.path.join(ROOT, "wiring", "_selftest_tier_typo")
+        open(tt, "w").write("stem = _selftest_tier_typo\nindex_heading = X\ntier = everydy\n")
+        open(wtt, "w").write("description = probe\n")
+        try:
+            r = run(["--dest", dest, "--only", "_selftest_tier_typo"])
+            check("tier typo: clean error",
+                  r.returncode != 0 and "must be one of" in r.stderr and "Traceback" not in r.stderr, r.stderr)
+        finally:
+            os.remove(tt)
+            os.remove(wtt)
+
+        # tier=everyday but no trigger-block file -> clean error
+        bk = os.path.join(CONFIG, "_selftest_everyday_noblock")
+        wbk = os.path.join(ROOT, "wiring", "_selftest_everyday_noblock")
+        open(bk, "w").write("stem = _selftest_everyday_noblock\nindex_heading = X\ntier = everyday\n")
+        open(wbk, "w").write("description = probe\n")
+        try:
+            r = run(["--dest", dest, "--only", "_selftest_everyday_noblock"])
+            check("everyday w/o block file: clean error",
+                  r.returncode != 0 and "trigger block" in r.stderr and "Traceback" not in r.stderr, r.stderr)
+        finally:
+            os.remove(bk)
+            os.remove(wbk)
     finally:
         shutil.rmtree(dest, ignore_errors=True)
 

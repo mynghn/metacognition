@@ -11,7 +11,7 @@ Flat `key = value`, one per line; `#` starts a comment. Deliberately not a templ
 | `env_prefix` | engine (location override) | prefix for the per-sibling env var that overrides the vault location: `<PREFIX>_KB_VAULT` | `CE` |
 | `tier` | D2 (discovery wiring) | `everyday` \| `common` \| `situational` — gates the tier-gated `AGENTS.md` block (Decision-5) | `everyday` |
 
-The engine reads `stem`, `index_heading`, and `env_prefix` (vault-location override, checked before the family-level `$KB_VAULT`); `tier` is reserved for D2 and ignored by the engine.
+The engine reads `stem`, `index_heading`, and `env_prefix` (vault-location override, checked before the family-level `$KB_VAULT`); `tier` is consumed by the installer (D2 — it gates the `AGENTS.md` trigger block, emitted only for `everyday`) and ignored by the engine.
 
 ## Example
 

@@ -7,20 +7,32 @@ the SAME adapter into both `~/.claude/skills/<name>/` and `~/.codex/skills/<name
 plugin, no privileged agent, the two providers never diverge (DESIGN#Decision-2, Decision-8;
 SPEC#O-1, INV-3). Replaces the chezmoi `.chezmoitemplates` single-sourcing.
 
-Scope — feature 0004, task D1: the adapter rendering + both-provider deploy. The tier-gated
-`AGENTS.md` discovery block is task D2; recording the vault location + git-initialising the
-vault is task D3. The body's engine/config/vault paths are baked absolute at install time, so
-a rendered adapter is machine-specific while its source stays generic.
+Scope — feature 0004, tasks D1 + D2: render each sibling's adapter and deploy the byte-identical
+adapter to both providers (D1), and emit the tier-gated discovery wiring (D2) — the `description`
+into both adapters always, plus, for Everyday-tier siblings only, a named trigger block upserted
+into the shared `AGENTS.md` (which both `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` symlink to;
+`tier` comes from the per-sibling config). Recording the vault location + git-initialising the
+vault is task D3. The body's engine/config/vault paths are baked absolute at install time, so a
+rendered adapter is machine-specific while its source stays generic.
+
+The AGENTS.md emission is SURGICAL: it inserts-or-replaces only its own named `<tag>...</tag>`
+span and leaves every other block (the user's operating instructions) byte-for-byte untouched,
+idempotent on re-run — it never rewrites the file. With the default `--dest ~` the shared file
+is the live `~/AGENTS.md`, which stays chezmoi-managed until B1 retires the blocks from the
+chezmoi source — so D1/D2 testing must pass `--dest <sandbox>`; the M2/B1 cutover owns the first
+live write (and may add a `--cutover` guard there).
 
 The install is ADDITIVE: it writes/overwrites the current siblings' adapters but does not prune
 adapters for removed/renamed siblings — retiring a stale adapter is the cutover's job (M2).
 """
 import argparse
 import os
+import re
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_VAULT = "~/.local/share/llm-agent-knowledge-vault"
 PROVIDERS = (".claude", ".codex")  # both get the byte-identical adapter
+TIERS = ("everyday", "common", "situational")  # Decision-5 gating; only `everyday` emits an AGENTS.md block
 
 
 def parse_kv(path):
@@ -74,7 +86,60 @@ def render_adapter(sibling, vault):
         body = body.replace(token, value)
     name = stem + "-knowledge-base"
     adapter = "---\nname: %s\ndescription: %s\n---\n\n%s" % (name, description, body)
-    return name, adapter
+    tier = (cfg.get("tier") or "").strip().lower()
+    if tier not in TIERS:
+        raise SystemExit("install: config/%s has tier %r — must be one of %s (a typo silently "
+                         "drops an Everyday trigger)" % (sibling, cfg.get("tier", ""), ", ".join(TIERS)))
+    block = agents_block(sibling, stem) if tier == "everyday" else None
+    if tier == "everyday" and block is None:
+        raise SystemExit("install: %r is tier=everyday but has no trigger block — "
+                         "add wiring/%s.agents.md" % (sibling, sibling))
+    return name, adapter, block
+
+
+def agents_block(sibling, stem):
+    """The named `AGENTS.md` trigger block for an Everyday-tier sibling, or None.
+
+    The block body is single-sourced in `wiring/<sibling>.agents.md`; the tag is the
+    stem with hyphens as underscores. Wrapping the body in its tag here keeps the tag
+    single-sourced from the stem — the mirror of how render_adapter wraps the adapter
+    body in its frontmatter (DESIGN#Decision-5). The body must not embed its own closing
+    tag (the installer adds it), and is normalised to exactly one trailing newline so the
+    wrap is insensitive to the body file's trailing-newline shape."""
+    path = os.path.join(ROOT, "wiring", sibling + ".agents.md")
+    if not os.path.isfile(path):
+        return None
+    body = open(path, encoding="utf-8").read()
+    tag = stem.replace("-", "_")
+    close = "</%s>" % tag
+    if close in body:
+        raise SystemExit("install: wiring/%s.agents.md must not contain its own closing tag %r "
+                         "— the installer adds it" % (sibling, close))
+    body = body.rstrip("\n") + "\n"
+    return "<%s>\n%s%s" % (tag, body, close)
+
+
+def upsert_agents_block(agents_path, block):
+    """Insert-or-replace one named `<tag>...</tag>` block in the shared AGENTS.md and
+    return the tag. Surgical and idempotent: replaces the block in place when already
+    present (never disturbing the surrounding operating instructions), appends it at
+    EOF when absent, and writes only if the content actually changes.
+
+    The tag is matched only as a FULL LINE (`^<tag>$` … `^</tag>$`), so a bare mention of
+    the tag inside another block's prose can neither serve as a false open boundary (which
+    would swallow the neighbour) nor as a false close. AGENTS.md is treated as LF-only,
+    consistent with the engine."""
+    tag = block[1:block.index(">")]
+    existing = open(agents_path, encoding="utf-8").read() if os.path.isfile(agents_path) else ""
+    pat = re.compile(r"^<%s>$.*?^</%s>$" % (re.escape(tag), re.escape(tag)), re.DOTALL | re.MULTILINE)
+    if pat.search(existing):
+        updated = pat.sub(lambda m: block, existing)  # lambda → block is literal, not a regex template
+    else:
+        updated = (existing.rstrip("\n") + "\n\n" if existing else "") + block + "\n"
+    if updated != existing:
+        with open(agents_path, "w", encoding="utf-8") as fh:
+            fh.write(updated)
+    return tag
 
 
 def siblings():
@@ -93,7 +158,8 @@ def siblings():
 
 def main():
     p = argparse.ArgumentParser(description="Install the KB family into both agents.")
-    p.add_argument("--dest", default="~", help="install prefix holding .claude/ and .codex/ (default: ~)")
+    p.add_argument("--dest", default="~", help="install prefix holding .claude/, .codex/, and the shared "
+                   "AGENTS.md (default: ~ — the live chezmoi-managed file; pass a sandbox for D1/D2 testing)")
     p.add_argument("--vault", default=DEFAULT_VAULT, help="vault repo path baked into adapters")
     p.add_argument("--only", help="install just this sibling (config/ stem or full skill name)")
     args = p.parse_args()
@@ -103,14 +169,18 @@ def main():
     if only and only.endswith("-knowledge-base"):
         only = only[: -len("-knowledge-base")]  # accept the printed skill name too
     targets = [only] if only else siblings()
+    agents_path = os.path.join(dest, "AGENTS.md")  # the shared file both providers symlink to
     for sibling in targets:
-        name, adapter = render_adapter(sibling, args.vault)
+        name, adapter, block = render_adapter(sibling, args.vault)
         for provider in PROVIDERS:
             skill_dir = os.path.join(dest, provider, "skills", name)
             os.makedirs(skill_dir, exist_ok=True)
             with open(os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8") as fh:
                 fh.write(adapter)
         print("install: %s -> %s" % (name, ", ".join("%s/skills/%s/SKILL.md" % (pr, name) for pr in PROVIDERS)))
+        if block is not None:
+            tag = upsert_agents_block(agents_path, block)
+            print("install: AGENTS.md <%s> trigger block -> %s" % (tag, agents_path))
 
 
 if __name__ == "__main__":
