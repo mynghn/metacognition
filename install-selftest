@@ -112,6 +112,24 @@ def main():
         finally:
             os.remove(nw)
 
+        # a description with ': ', '"', and '\' renders as a valid (quoted + escaped) YAML scalar —
+        # an unquoted ': ' is strict-invalid YAML (and shipped in 2/3 live adapters before this fix).
+        yt = os.path.join(CONFIG, "_selftest_yaml")
+        wyt = os.path.join(ROOT, "wiring", "_selftest_yaml")
+        open(yt, "w").write("stem = _selftest_yaml\nindex_heading = X\ntier = situational\n")
+        open(wyt, "w").write('description = colon: here, a "quote", and a \\ slash\n')
+        d_y = tempfile.mkdtemp(prefix="kb-install-")
+        try:
+            run(["--dest", d_y, "--only", "_selftest_yaml"])
+            line = next(l for l in read(d_y, ".claude", "_selftest_yaml-knowledge-base").splitlines()
+                        if l.startswith("description:"))
+            check("description rendered as a quoted+escaped YAML scalar",
+                  line == r'description: "colon: here, a \"quote\", and a \\ slash"', line)
+        finally:
+            os.remove(yt)
+            os.remove(wyt)
+            shutil.rmtree(d_y, ignore_errors=True)
+
         # ---- tier-gated AGENTS.md trigger-block emission ----
         def expected_block(stem):
             body = open(os.path.join(ROOT, "wiring", stem + ".agents.md"), encoding="utf-8").read()

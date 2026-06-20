@@ -89,7 +89,11 @@ def render_adapter(sibling, vault):
     ):
         body = body.replace(token, value)
     name = stem + "-knowledge-base"
-    adapter = "---\nname: %s\ndescription: %s\n---\n\n%s" % (name, description, body)
+    # The description is free-form prose — em-dashes, colons, apostrophes, and the generator's
+    # [DRAFT:]/[AUTHOR:] markers — so it MUST be a quoted YAML scalar; an unquoted ': ' is
+    # strict-invalid YAML. Double-quote with \ and " escaped (valid for any single-line value).
+    desc = '"%s"' % description.replace("\\", "\\\\").replace('"', '\\"')
+    adapter = "---\nname: %s\ndescription: %s\n---\n\n%s" % (name, desc, body)
     tier = (cfg.get("tier") or "").strip().lower()
     if tier not in TIERS:
         raise SystemExit("install: config/%s has tier %r — must be one of %s (a typo silently "
@@ -134,15 +138,21 @@ def upsert_agents_block(agents_path, block):
     would swallow the neighbour) nor as a false close. AGENTS.md is treated as LF-only,
     consistent with the engine."""
     tag = block[1:block.index(">")]
-    existing = open(agents_path, encoding="utf-8").read() if os.path.isfile(agents_path) else ""
+    try:
+        existing = open(agents_path, encoding="utf-8").read() if os.path.isfile(agents_path) else ""
+    except OSError as err:
+        raise SystemExit("install: cannot read AGENTS.md at %s — %s" % (agents_path, err))
     pat = re.compile(r"^<%s>$.*?^</%s>$" % (re.escape(tag), re.escape(tag)), re.DOTALL | re.MULTILINE)
     if pat.search(existing):
         updated = pat.sub(lambda m: block, existing)  # lambda → block is literal, not a regex template
     else:
         updated = (existing.rstrip("\n") + "\n\n" if existing else "") + block + "\n"
     if updated != existing:
-        with open(agents_path, "w", encoding="utf-8") as fh:
-            fh.write(updated)
+        try:
+            with open(agents_path, "w", encoding="utf-8") as fh:
+                fh.write(updated)
+        except OSError as err:
+            raise SystemExit("install: cannot write AGENTS.md at %s — %s" % (agents_path, err))
     return tag
 
 
@@ -185,9 +195,12 @@ def record_vault_location(vault):
     conf = os.path.join(config_home(), "metacognition", "vault")
     content = os.path.abspath(os.path.expanduser(vault)) + "\n"
     if not (os.path.isfile(conf) and open(conf, encoding="utf-8").read() == content):
-        os.makedirs(os.path.dirname(conf), exist_ok=True)
-        with open(conf, "w", encoding="utf-8") as fh:
-            fh.write(content)
+        try:
+            os.makedirs(os.path.dirname(conf), exist_ok=True)
+            with open(conf, "w", encoding="utf-8") as fh:
+                fh.write(content)
+        except OSError as err:
+            raise SystemExit("install: cannot record the vault location at %s — %s" % (conf, err))
     return conf
 
 
@@ -224,9 +237,13 @@ def main():
         name, adapter, block = render_adapter(sibling, args.vault)
         for provider in PROVIDERS:
             skill_dir = os.path.join(dest, provider, "skills", name)
-            os.makedirs(skill_dir, exist_ok=True)
-            with open(os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8") as fh:
-                fh.write(adapter)
+            try:
+                os.makedirs(skill_dir, exist_ok=True)
+                with open(os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8") as fh:
+                    fh.write(adapter)
+            except OSError as err:  # bad/unwritable --dest, …
+                raise SystemExit("install: cannot write %s/skills/%s/SKILL.md under --dest %s — %s"
+                                 % (provider, name, dest, err))
         print("install: %s -> %s" % (name, ", ".join("%s/skills/%s/SKILL.md" % (pr, name) for pr in PROVIDERS)))
         if block is not None:
             tag = upsert_agents_block(agents_path, block)
