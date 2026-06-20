@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""install — deploy the LLM-Agent Knowledge Base family into both agents.
+"""install — deploy the Metacognition family into both agents.
 
 Renders each sibling's `SKILL.md` adapter from ONE config-parameterized body template
 (templates/skill-body.md) + the per-sibling config + its discovery description, and writes
@@ -22,7 +22,7 @@ idempotent on re-run — it never rewrites the file. With the default `--dest ~`
 is the live `~/AGENTS.md`, which stays chezmoi-managed until B1 retires the blocks from the
 chezmoi source — so D1/D2 testing must pass `--dest <sandbox>`; the M2/B1 cutover owns the first
 live write (and may add a `--cutover` guard there). D3's vault setup likewise writes a live file —
-`$XDG_CONFIG_HOME/llm-agent-knowledge-base/vault` (the real `~/.config` when XDG is unset) — and
+`$XDG_CONFIG_HOME/metacognition/vault` (the real `~/.config` when XDG is unset) — and
 git-inits `--vault`; these are gated by `$XDG_CONFIG_HOME` / `--vault`, NOT `--dest`, so non-cutover
 testing must sandbox ALL THREE (`--dest`, `$XDG_CONFIG_HOME`, and a sandbox `--vault`).
 
@@ -35,7 +35,7 @@ import re
 import subprocess
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_VAULT = "~/.local/share/llm-agent-knowledge-vault"
+DEFAULT_VAULT = "~/.local/share/metacognition-vault"
 PROVIDERS = (".claude", ".codex")  # both get the byte-identical adapter
 TIERS = ("everyday", "common", "situational")  # Decision-5 gating; only `everyday` emits an AGENTS.md block
 
@@ -181,9 +181,9 @@ def ensure_vault_repo(vault):
 
 def record_vault_location(vault):
     """Write the engine<->installer contract file (DESIGN#Decision-4): the vault's absolute path
-    at $XDG_CONFIG_HOME/llm-agent-knowledge-base/vault, so the engine resolves the vault with no
+    at $XDG_CONFIG_HOME/metacognition/vault, so the engine resolves the vault with no
     --vault/env on a clean install. Writes only on change. Returns the file path."""
-    conf = os.path.join(config_home(), "llm-agent-knowledge-base", "vault")
+    conf = os.path.join(config_home(), "metacognition", "vault")
     content = os.path.abspath(os.path.expanduser(vault)) + "\n"
     if not (os.path.isfile(conf) and open(conf, encoding="utf-8").read() == content):
         os.makedirs(os.path.dirname(conf), exist_ok=True)

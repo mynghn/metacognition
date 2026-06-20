@@ -26,7 +26,7 @@ import sys
 import tempfile
 
 ENGINE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kb-engine")
-DEFAULT_VAULT = os.path.expanduser("~/.local/share/llm-agent-knowledge-vault")
+DEFAULT_VAULT = os.path.expanduser("~/.local/share/metacognition-vault")
 
 VALID_ENTRY = """---
 name: {slug}

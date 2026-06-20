@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""kb-engine — the shared operations engine for the LLM-Agent Knowledge Base family.
+"""kb-engine — the shared operations engine for the Metacognition family.
 
 ONE engine backs every sibling's capture / refresh / remove / locate, parameterized
 by a thin per-sibling config. Re-derived from the three near-duplicate `*-kb` scripts
@@ -72,7 +72,7 @@ def topic_dir(vault, cfg):
     return os.path.join(vault, cfg["stem"])
 
 
-DEFAULT_VAULT = "~/.local/share/llm-agent-knowledge-vault"
+DEFAULT_VAULT = "~/.local/share/metacognition-vault"
 
 
 def resolve_vault(explicit, cfg):
@@ -97,7 +97,7 @@ def resolve_vault(explicit, cfg):
         return chosen
     conf = os.path.join(
         os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
-        "llm-agent-knowledge-base", "vault",
+        "metacognition", "vault",
     )
     if os.path.isfile(conf):
         chosen = _clean_path(open(conf, encoding="utf-8").read())

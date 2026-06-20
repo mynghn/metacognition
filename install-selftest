@@ -12,7 +12,7 @@ byte-exact into the shared AGENTS.md; a Situational sibling gets none; the upser
 tier=everyday sibling missing its block file is a clean error.
 
 D3 (vault setup): the installer git-inits the vault as a repo ROOT, records its location at
-$XDG_CONFIG_HOME/llm-agent-knowledge-base/vault, and the engine then resolves that vault with no
+$XDG_CONFIG_HOME/metacognition/vault, and the engine then resolves that vault with no
 --vault/env. Every install here runs in a sandboxed vault + $XDG_CONFIG_HOME so the real ~/.config
 and the live vault are never touched.
 """
@@ -249,7 +249,7 @@ def main():
             os.remove(wbk)
 
         # ---- D3: vault git-init (repo root) + location recorded + engine resolves it ----
-        conf = os.path.join(os.environ["XDG_CONFIG_HOME"], "llm-agent-knowledge-base", "vault")
+        conf = os.path.join(os.environ["XDG_CONFIG_HOME"], "metacognition", "vault")
         top = subprocess.run(["git", "-C", _VAULT, "rev-parse", "--show-toplevel"], capture_output=True, text=True)
         check("D3: vault git-inited as a repo root",
               top.returncode == 0 and os.path.realpath(top.stdout.strip()) == os.path.realpath(_VAULT), top.stderr)

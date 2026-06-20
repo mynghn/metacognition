@@ -1,4 +1,4 @@
-# LLM-Agent Knowledge Bases — Family Registry
+# Metacognition — Family Registry
 
 The "should I add a sibling?" decision record for a **federated** family of agent-practice knowledge bases. Each sibling is its own focused KB skill following the `context-engineering-knowledge-base` pattern.
 
@@ -14,7 +14,7 @@ Why federated: small coherent units retrieve precisely (a skill auto-invokes on 
 
 Spelled-out everywhere: skill name, both adapter dirs (`~/.claude/skills/…`, `~/.codex/skills/…`), and the core dir (`~/.local/share/…`) all use `<topic>-knowledge-base` — confirmed on `context-engineering-knowledge-base`. `-kb` is not used in user-facing names. The family-table entries below are topic **stems**; the realized skill/dir name appends `-knowledge-base` (e.g. `prompt-engineering` → `prompt-engineering-knowledge-base`).
 
-This registry root is `llm-agent-knowledge-base` and is a **registry, not a skill** — it has no `SKILL.md` and is never auto-invoked. The siblings are the skills; this is their map.
+This registry root is `metacognition` and is a **registry, not a skill** — it has no `SKILL.md` and is never auto-invoked. The siblings are the skills; this is their map.
 
 ## Validated layering
 

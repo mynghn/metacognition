@@ -1,18 +1,18 @@
-# LLM-Agent Knowledge Base — Tooling
+# Metacognition — Tooling
 
 The published tooling + registry home for a **federated family of agent-practice knowledge bases**. Each sibling is a focused KB skill (context-engineering, prompt-engineering, tool-design, …) that both Claude Code and Codex discover and query. This repo holds the shared machinery; the knowledge itself lives in the companion **vault repo**.
 
 Two independent repos, two histories:
 
-- **`llm-agent-knowledge-base`** (this repo) — the tooling: a shared operations engine, the thin per-sibling config, single-sourced pattern templates, the discovery-wiring source, the [`FAMILY.md`](./FAMILY.md) registry, and the installer. Released + versioned (low churn).
-- **`llm-agent-knowledge-vault`** — one Obsidian-shaped vault, a top-level `<topic>/` folder per sibling. Mutated + committed at runtime by the engine (high churn).
+- **`metacognition`** (this repo) — the tooling: a shared operations engine, the thin per-sibling config, single-sourced pattern templates, the discovery-wiring source, the [`FAMILY.md`](./FAMILY.md) registry, and the installer. Released + versioned (low churn).
+- **`metacognition-vault`** — one Obsidian-shaped vault, a top-level `<topic>/` folder per sibling. Mutated + committed at runtime by the engine (high churn).
 
 Splitting them keeps runtime knowledge writes off the tooling history and lets either be published or installed on its own. See `docs/features/0004-knowledge-base-rehome/` (DESIGN Decision-1).
 
 ## Layout
 
 ```
-llm-agent-knowledge-base/
+metacognition/
 ├── FAMILY.md          the "should I add a sibling?" registry (map of the family)
 ├── engine/            shared operations engine — capture / refresh / remove / locate
 ├── config/            thin per-sibling config — { stem, ENV prefix, INDEX heading, tier }
