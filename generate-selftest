@@ -21,6 +21,8 @@ Encodes the adversarial findings so they cannot regress:
     family link the installer never checks; a typo must still surface).
 """
 import os
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -28,6 +30,8 @@ import tempfile
 ROOT = os.path.dirname(os.path.abspath(__file__))
 GEN = os.path.join(ROOT, "generate")
 CONFIG = os.path.join(ROOT, "config")
+ENGINE = os.path.join(ROOT, "engine", "kb-engine")
+SHIPPED_INDEX = os.path.join(os.path.dirname(ROOT), "metacognition-vault", "context-engineering", "INDEX.md")
 CONFIG_KEYS = ("stem", "index_heading", "env_prefix", "tier")
 _ok = []
 
@@ -38,6 +42,14 @@ def check(name, cond, detail=""):
 
 
 def run(args):
+    """Derivation/preview mode — ALWAYS --dry-run so the G1 checks never write into the real
+    repos. The default action is to WRITE, so a check that omitted --dry-run would scaffold
+    a sibling into the live tooling repo + vault for real."""
+    return subprocess.run([sys.executable, GEN, "--dry-run"] + args, capture_output=True, text=True)
+
+
+def run_write(args):
+    """Real scaffold (writes) — every G2 caller passes sandboxed --config-dir/--wiring-dir/--vault."""
     return subprocess.run([sys.executable, GEN] + args, capture_output=True, text=True)
 
 
@@ -154,6 +166,90 @@ def main():
     r = run(["--tier", "common", "--", "-foo"])
     check("strict stem rejects '-foo' (via STEM_RE past `--`)",
           r.returncode != 0 and "kebab-case" in r.stderr, r.stderr)
+
+    # ---- G2: scaffold writes config + wiring + vault skeleton, rendered from templates ----
+    sb = tempfile.mkdtemp(prefix="kb-gen-g2-")
+    try:
+        cdir, wdir, vault = os.path.join(sb, "config"), os.path.join(sb, "wiring"), os.path.join(sb, "vault")
+        scaffold = ["agent-architectures", "--config-dir", cdir, "--wiring-dir", wdir, "--vault", vault]
+        r = run_write(scaffold)
+        topic = os.path.join(vault, "agent-architectures")
+        cfg_f, wir_f = os.path.join(cdir, "agent-architectures"), os.path.join(wdir, "agent-architectures")
+        idx_f, kdir = os.path.join(topic, "INDEX.md"), os.path.join(topic, "knowledge")
+        check("G2: scaffold writes config + wiring + INDEX + knowledge/",
+              r.returncode == 0 and all(os.path.exists(p) for p in (cfg_f, wir_f, idx_f, kdir)), r.stderr)
+        check("G2: knowledge/ is empty (no entries)", os.path.isdir(kdir) and os.listdir(kdir) == [])
+        idx = open(idx_f, encoding="utf-8").read()
+        check("G2: INDEX has the engine's required '## Concepts' + comment",
+              "\n## Concepts\n" in idx and "<!-- one line per concept; appended by capture/refresh via the shared engine -->" in idx)
+        check("G2: INDEX records seeds (## Seeds + the topic primary, before ## Concepts)",
+              "## Seeds" in idx and "Anthropic, Multi-agent research system" in idx
+              and idx.index("## Seeds") < idx.index("## Concepts"))
+        check("G2: INDEX renders from templates/index-skeleton.md (boilerplate single-sourced there)",
+              "consume during the content build" in idx and os.path.isfile(os.path.join(ROOT, "templates", "index-skeleton.md")))
+
+        # header byte-parity vs the shipped vault INDEX — the ONLY diff is the ## Seeds insert (O-5)
+        if os.path.isfile(SHIPPED_INDEX):
+            run_write(["context-engineering", "--config-dir", os.path.join(sb, "c2"),
+                       "--wiring-dir", os.path.join(sb, "w2"), "--vault", os.path.join(sb, "v2")])
+            gen_ce = open(os.path.join(sb, "v2", "context-engineering", "INDEX.md"), encoding="utf-8").read()
+            shipped_full = open(SHIPPED_INDEX, encoding="utf-8").read()
+            header = "\n".join(shipped_full.split("\n")[:7])  # H1 .. "Each line:"
+            check("G2: generated INDEX header byte-identical to shipped", gen_ce.startswith(header), header)
+            # strong O-3/INV-1 guard: generated INDEX minus the ## Seeds insert == shipped pre-entry header
+            mfirst = re.search(r"(?m)^- \[", shipped_full)
+            shipped_pre = (shipped_full[:mfirst.start()] if mfirst else shipped_full).rstrip("\n")
+            gen_no_seeds = re.sub(r"## Seeds\n.*?\n\n(?=## )", "", gen_ce, flags=re.S).rstrip("\n")
+            check("G2: generated INDEX == shipped header with ONLY the ## Seeds insert added",
+                  gen_no_seeds == shipped_pre, "tail gen=%r vs shipped=%r" % (gen_no_seeds[-60:], shipped_pre[-60:]))
+        else:
+            print("  SKIP G2 header parity — shipped vault INDEX not at %s" % SHIPPED_INDEX)
+
+        # overwrite guard
+        r = run_write(scaffold)
+        check("G2: refuse overwrite of an existing sibling (clean error)",
+              r.returncode != 0 and "refusing to overwrite" in r.stderr and "Traceback" not in r.stderr, r.stderr)
+        r = run_write(scaffold + ["--force"])
+        check("G2: --force overwrites", r.returncode == 0, r.stderr)
+
+        # born-running: the shared engine captures into the generated skeleton, ## Seeds preserved
+        subprocess.run(["git", "-C", vault, "init", "-q"], check=True)
+        subprocess.run(["git", "-C", vault, "config", "user.email", "t@t"], check=True)
+        subprocess.run(["git", "-C", vault, "config", "user.name", "t"], check=True)
+        entry = ("---\nname: probe-entry\ndescription: a probe trigger\nlast_refreshed: 2026-01-01\n"
+                 "sources:\n  - http://example.com\n---\n\nbody\n")
+        e = subprocess.run([sys.executable, ENGINE, "--config", cfg_f, "--vault", vault, "capture", "probe-entry"],
+                           input=entry, capture_output=True, text=True)
+        check("G2: engine captures into the generated skeleton (born-running)",
+              e.returncode == 0 and os.path.isfile(os.path.join(kdir, "probe-entry.md")), (e.stdout + e.stderr).strip())
+        idx2 = open(idx_f, encoding="utf-8").read()
+        check("G2: capture upserts under ## Concepts AND preserves ## Seeds",
+              "- [probe-entry](knowledge/probe-entry.md) — a probe trigger" in idx2 and "## Seeds" in idx2, idx2)
+
+        # --force on a content-bearing INDEX warns about de-indexing (not silent)
+        r = run_write(scaffold + ["--force"])
+        check("G2: --force on an INDEX with entries warns (de-indexing not silent)",
+              r.returncode == 0 and "DE-INDEXING" in r.stderr and "probe-entry" in r.stderr, r.stderr)
+
+        # reserved + charset guards on index_heading (the single rendered source value)
+        r = run(["agent-architectures", "--index-heading", "Seeds"])
+        check("G2: --index-heading Seeds rejected (reserved scaffold heading)",
+              r.returncode != 0 and "reserved" in r.stderr and "Traceback" not in r.stderr, r.stderr)
+        r = run(["agent-architectures", "--index-heading", "Foo *bar*"])
+        check("G2: markdown-active index_heading rejected",
+              r.returncode != 0 and "markdown-active" in r.stderr and "Traceback" not in r.stderr, r.stderr)
+
+        # atomic write: --vault is a file -> clean error, no half-scaffold (no config written)
+        vf = os.path.join(sb, "vault-is-file")
+        open(vf, "w").write("x")
+        cf = os.path.join(sb, "cf")
+        r = run_write(["evaluation-observability", "--config-dir", cf,
+                       "--wiring-dir", os.path.join(sb, "wf"), "--vault", vf])
+        check("G2: --vault is a file -> clean error, no half-scaffold",
+              r.returncode != 0 and "not a directory" in r.stderr and "Traceback" not in r.stderr
+              and not os.path.exists(os.path.join(cf, "evaluation-observability")), r.stderr)
+    finally:
+        shutil.rmtree(sb, ignore_errors=True)
 
     passed, total = sum(_ok), len(_ok)
     print("\n%s: %d/%d checks passed" % ("PASS" if passed == total else "FAIL", passed, total))
