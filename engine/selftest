@@ -1,0 +1,178 @@
+#!/usr/bin/env python3
+"""selftest — behavioral-parity tests for kb-engine (feature 0004, task E1).
+
+Each test encodes a behavior the engine must preserve from the legacy `*-kb` scripts,
+so this file is the durable home for E1's parity WHYs (run it after any engine change):
+  - valid capture writes the entry and inserts a slug-sorted INDEX line (keeping the
+    section's pre-entry boilerplate);
+  - INDEX stays slug-sorted across out-of-order captures;
+  - capture refuses an existing slug; refresh refuses an absent one; refresh overwrites;
+  - every frontmatter rule rejects (no frontmatter / name!=slug / empty description /
+    missing last_refreshed / missing sources) AND leaves nothing written (atomicity);
+  - a missing INDEX heading rejects with no orphan entry (the E1 atomicity fix);
+  - remove drops the entry file and its INDEX line; invalid slug rejects; locate resolves.
+"""
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+
+ENGINE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kb-engine")
+
+VALID_ENTRY = """---
+name: {slug}
+description: one-line retrieval trigger for {slug}
+last_refreshed: 2026-06-20
+sources:
+  - Author, "Title", 2026 — https://example.com
+---
+
+A distilled, self-contained explanation of {slug}.
+
+Related: [[something-else]]
+"""
+
+INDEX_SKELETON = """# Test KB — Index
+
+Read this index first, then load only matching entries.
+
+## Concepts
+
+<!-- one line per concept; appended by capture/refresh -->
+"""
+
+_checks = []
+
+
+def check(name, ok, detail=""):
+    _checks.append((name, ok, detail))
+    print("  %s %s%s" % ("PASS" if ok else "FAIL", name, ("  — " + detail) if detail and not ok else ""))
+
+
+def make_vault(heading="## Concepts"):
+    vault = tempfile.mkdtemp(prefix="kb-selftest-")
+    tdir = os.path.join(vault, "test-topic")
+    os.makedirs(os.path.join(tdir, "knowledge"))
+    with open(os.path.join(tdir, "INDEX.md"), "w", encoding="utf-8") as fh:
+        fh.write(INDEX_SKELETON.replace("## Concepts", heading))
+    cfg = os.path.join(vault, "config")
+    with open(cfg, "w", encoding="utf-8") as fh:
+        fh.write("stem = test-topic\nindex_heading = Concepts\nenv_prefix = CE\ntier = everyday\n")
+    return vault, tdir, cfg
+
+
+def run(cfg, vault, args, stdin=None):
+    return subprocess.run(
+        [sys.executable, ENGINE, "--config", cfg, "--vault", vault] + args,
+        input=stdin, capture_output=True, text=True,
+    )
+
+
+def index_lines(tdir):
+    with open(os.path.join(tdir, "INDEX.md"), encoding="utf-8") as fh:
+        return fh.read().split("\n")
+
+
+def entry_slugs(tdir):
+    return [l.split("[", 1)[1].split("]", 1)[0] for l in index_lines(tdir) if l.startswith("- [")]
+
+
+def main():
+    vault, tdir, cfg = make_vault()
+    try:
+        # valid capture writes entry + INDEX line, preserving the boilerplate comment
+        r = run(cfg, vault, ["capture", "beta"], VALID_ENTRY.format(slug="beta"))
+        check("capture exits 0", r.returncode == 0, r.stderr)
+        check("capture writes entry file", os.path.isfile(os.path.join(tdir, "knowledge", "beta.md")))
+        check("capture inserts INDEX line", "beta" in entry_slugs(tdir))
+        check("INDEX keeps boilerplate comment",
+              any("one line per concept" in l for l in index_lines(tdir)))
+
+        # out-of-order captures stay slug-sorted
+        run(cfg, vault, ["capture", "alpha"], VALID_ENTRY.format(slug="alpha"))
+        run(cfg, vault, ["capture", "gamma"], VALID_ENTRY.format(slug="gamma"))
+        check("INDEX slug-sorted", entry_slugs(tdir) == ["alpha", "beta", "gamma"],
+              str(entry_slugs(tdir)))
+
+        # capture refuses an existing slug; nothing changes
+        before = open(os.path.join(tdir, "INDEX.md"), encoding="utf-8").read()
+        r = run(cfg, vault, ["capture", "beta"], VALID_ENTRY.format(slug="beta"))
+        check("capture refuses existing slug", r.returncode != 0, r.stderr)
+        check("refused capture leaves INDEX unchanged",
+              open(os.path.join(tdir, "INDEX.md"), encoding="utf-8").read() == before)
+
+        # refresh refuses an absent slug; overwrites an existing one
+        r = run(cfg, vault, ["refresh", "nope"], VALID_ENTRY.format(slug="nope"))
+        check("refresh refuses absent slug", r.returncode != 0, r.stderr)
+        r = run(cfg, vault, ["refresh", "beta"], VALID_ENTRY.format(slug="beta").replace(
+            "one-line retrieval trigger for beta", "REFRESHED trigger"))
+        check("refresh exits 0", r.returncode == 0, r.stderr)
+        check("refresh updates INDEX description",
+              any("REFRESHED trigger" in l for l in index_lines(tdir)))
+
+        # every frontmatter rule rejects AND writes nothing (atomicity)
+        bad = {
+            "no-frontmatter": "no frontmatter here\n",
+            "name-mismatch": VALID_ENTRY.format(slug="different-name").replace(
+                "name: different-name", "name: wrong"),
+            "empty-description": VALID_ENTRY.format(slug="bad-desc").replace(
+                "description: one-line retrieval trigger for bad-desc", "description:"),
+            "missing-last-refreshed": "\n".join(
+                l for l in VALID_ENTRY.format(slug="no-date").split("\n")
+                if not l.startswith("last_refreshed:")) + "\n",
+            "missing-sources": "\n".join(
+                l for l in VALID_ENTRY.format(slug="no-src").split("\n")
+                if not l.startswith("sources:") and not l.strip().startswith("- Author")) + "\n",
+        }
+        for slug, body in bad.items():
+            r = run(cfg, vault, ["capture", slug], body)
+            wrote = os.path.isfile(os.path.join(tdir, "knowledge", slug + ".md"))
+            check("reject bad frontmatter: %s" % slug, r.returncode != 0 and not wrote,
+                  "rc=%s wrote=%s" % (r.returncode, wrote))
+
+        # invalid slug rejects
+        r = run(cfg, vault, ["capture", "Bad_Slug"], VALID_ENTRY.format(slug="Bad_Slug"))
+        check("reject invalid slug", r.returncode != 0)
+
+        # CRLF input is accepted and normalized to LF (parity with the legacy file round-trip)
+        r = run(cfg, vault, ["capture", "crlf-entry"],
+                VALID_ENTRY.format(slug="crlf-entry").replace("\n", "\r\n"))
+        check("CRLF entry accepted", r.returncode == 0, r.stderr)
+        crlf_path = os.path.join(tdir, "knowledge", "crlf-entry.md")
+        check("CRLF entry normalized to LF",
+              os.path.isfile(crlf_path) and "\r" not in open(crlf_path, encoding="utf-8", newline="").read())
+
+        # remove drops the entry file and its INDEX line
+        r = run(cfg, vault, ["remove", "beta"])
+        check("remove exits 0", r.returncode == 0, r.stderr)
+        check("remove drops entry file", not os.path.exists(os.path.join(tdir, "knowledge", "beta.md")))
+        check("remove drops INDEX line", "beta" not in entry_slugs(tdir))
+        r = run(cfg, vault, ["remove", "ghost"])
+        check("remove refuses absent slug", r.returncode != 0)
+
+        # locate resolves paths
+        r = run(cfg, vault, ["locate", "alpha"])
+        check("locate exits 0", r.returncode == 0, r.stderr)
+        check("locate prints entry path", "alpha.md" in r.stdout)
+
+        # missing INDEX heading rejects WITH NO orphan entry (the atomicity fix)
+        v2, t2, c2 = make_vault(heading="## Other")
+        try:
+            r = run(c2, v2, ["capture", "orphan"], VALID_ENTRY.format(slug="orphan"))
+            wrote = os.path.isfile(os.path.join(t2, "knowledge", "orphan.md"))
+            check("missing heading rejects with no orphan", r.returncode != 0 and not wrote,
+                  "rc=%s wrote=%s" % (r.returncode, wrote))
+        finally:
+            shutil.rmtree(v2, ignore_errors=True)
+    finally:
+        shutil.rmtree(vault, ignore_errors=True)
+
+    passed = sum(1 for _, ok, _ in _checks if ok)
+    total = len(_checks)
+    print("\n%s: %d/%d checks passed" % ("PASS" if passed == total else "FAIL", passed, total))
+    return 0 if passed == total else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

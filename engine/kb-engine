@@ -1,0 +1,218 @@
+#!/usr/bin/env python3
+"""kb-engine — the shared operations engine for the LLM-Agent Knowledge Base family.
+
+ONE engine backs every sibling's capture / refresh / remove / locate, parameterized
+by a thin per-sibling config. Re-derived from the three near-duplicate `*-kb` scripts
+(which were byte-identical but for per-sibling tokens), so the family's operations live
+in a single source (SPEC#INV-2) and an operation change takes effect family-wide with no
+per-sibling copy to edit (SPEC#O-3). DESIGN#Decision-3.
+
+Scope — feature 0004, task E1: validation + entry write + slug-sorted INDEX upsert +
+remove + locate, against an explicitly-supplied vault folder. This engine deliberately
+does NOT commit and resolves no location: pointing the write+commit at the vault repo's
+own history, resolving the vault from installer-recorded config, and dropping the legacy
+`chezmoi apply` path are task E2 (DESIGN#Decision-4). Keeping the mutation here and the
+commit in E2 leaves one clean validate->write->commit seam (SPEC#INV-4).
+
+Operation semantics are preserved exactly from the `*-kb` scripts:
+  - frontmatter: `name` == slug, non-empty `description`, `last_refreshed` present, `sources` present
+  - INDEX upsert sorted by slug under the configured `## <index_heading>` section
+  - capture refuses an existing slug; refresh refuses an absent one
+  - kebab-case slug only
+
+A per-sibling config is a flat `key = value` file (see templates/sibling-config.schema.md).
+The engine consumes `stem` (the vault topic folder) and `index_heading`; `env_prefix` and
+`tier` are reserved for E2 (location override) and D2 (discovery wiring) respectively.
+"""
+import argparse
+import os
+import re
+import sys
+
+PROG = "kb-engine"
+
+
+def die(msg):
+    sys.stderr.write("%s: %s\n" % (PROG, msg))
+    raise SystemExit(1)
+
+
+def load_config(path):
+    """Parse a flat `key = value` config (shell- and python-readable; `#` comments)."""
+    if not os.path.isfile(path):
+        die("config not found: %s" % path)
+    cfg = {}
+    with open(path, encoding="utf-8") as fh:
+        for raw in fh:
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                die("config: malformed line (expected `key = value`): %r" % line)
+            k, v = line.split("=", 1)
+            cfg[k.strip()] = v.strip()
+    for required in ("stem", "index_heading"):
+        if not cfg.get(required):
+            die("config missing required field %r (%s)" % (required, path))
+    return cfg
+
+
+def valid_slug(slug):
+    if not re.match(r"^[a-z0-9][a-z0-9-]*$", slug):
+        die("invalid slug %r (kebab-case: a-z 0-9 -)" % slug)
+
+
+def topic_dir(vault, cfg):
+    return os.path.join(vault, cfg["stem"])
+
+
+def _frontmatter_fields(body):
+    """Return a field-lookup over the entry's YAML frontmatter, or die if absent."""
+    m = re.match(r"^---\n(.*?)\n---\n", body, re.S)
+    if not m:
+        die("entry has no YAML frontmatter")
+    fm = m.group(1)
+
+    def field(name):
+        mm = re.search(r"(?m)^%s:[ \t]*(.+?)[ \t]*$" % name, fm)
+        return mm.group(1).strip() if mm else None
+
+    return fm, field
+
+
+def _validate_frontmatter(body, slug):
+    """Validate frontmatter and return the description. Pure check — writes nothing."""
+    fm, field = _frontmatter_fields(body)
+    if field("name") != slug:
+        die("frontmatter name %r != slug %r" % (field("name"), slug))
+    desc = field("description")
+    if not desc:
+        die("frontmatter 'description' missing/empty")
+    if not field("last_refreshed"):
+        die("frontmatter 'last_refreshed' missing")
+    if not re.search(r"(?m)^sources:", fm):
+        die("frontmatter 'sources' missing")
+    return desc
+
+
+def _index_path(tdir):
+    idx = os.path.join(tdir, "INDEX.md")
+    if not os.path.isfile(idx):
+        die("INDEX.md not found under %s" % tdir)
+    return idx
+
+
+def _index_heading_pos(lines, cfg):
+    heading = "## " + cfg["index_heading"]
+    for i, line in enumerate(lines):
+        if line.strip() == heading:
+            return i
+    die("INDEX.md missing %r section" % heading)
+
+
+def _upsert_index(idx, lines, h, slug, desc):
+    """Upsert the entry's INDEX line, keeping the section slug-sorted (ported verbatim
+    from the `*-kb` python block)."""
+    line = "- [%s](knowledge/%s.md) — %s" % (slug, slug, desc.strip("\"'"))
+    entry_re = re.compile(r"^- \[([a-z0-9-]+)\]\(knowledge/\1\.md\) — ")
+    # Keep pre-entry lines (section comment/blanks); collect entry lines for re-sorting.
+    # NOTE: any non-entry line AFTER the first entry is intentionally dropped — exact parity
+    # with the legacy `*-kb` upsert (the section is heading + boilerplate + entry list, no tail).
+    keep, ents, seen = [], {}, False
+    for line_after in lines[h + 1:]:
+        mm = entry_re.match(line_after)
+        if mm:
+            ents[mm.group(1)] = line_after
+            seen = True
+        elif not seen:
+            keep.append(line_after)
+    ents[slug] = line
+    while keep and keep[-1].strip() == "":
+        keep.pop()
+    out = lines[: h + 1] + keep + [""] + [ents[k] for k in sorted(ents)] + [""]
+    with open(idx, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(out))
+
+
+def write_entry(verb, vault, cfg, slug):
+    valid_slug(slug)
+    tdir = topic_dir(vault, cfg)
+    entry = os.path.join(tdir, "knowledge", slug + ".md")
+    if verb == "capture":
+        if os.path.exists(entry):
+            die("entry %r exists — use 'refresh %s' to supersede it" % (slug, slug))
+    else:
+        if not os.path.exists(entry):
+            die("entry %r not found — use 'capture %s' to create it" % (slug, slug))
+    if sys.stdin.isatty():
+        die("no entry markdown on stdin — pipe the full <slug>.md content")
+    # Normalize newlines (CRLF/CR -> LF) to match the legacy `*-kb` round-trip, which read the
+    # body via a temp file under universal-newline translation; without this a CRLF entry would
+    # fail the `^---\n` frontmatter match that the legacy accepted (parity regression).
+    body = sys.stdin.read().replace("\r\n", "\n").replace("\r", "\n")
+
+    # Validate EVERYTHING (frontmatter + INDEX section) before any write, so a rejected
+    # op never leaves an orphan entry or half-written INDEX (SPEC#INV-4). The `*-kb`
+    # scripts wrote the entry before checking the heading; pre-validating closes that gap
+    # with no change on valid input.
+    desc = _validate_frontmatter(body, slug)
+    idx = _index_path(tdir)
+    lines = open(idx, encoding="utf-8").read().split("\n")
+    h = _index_heading_pos(lines, cfg)
+
+    os.makedirs(os.path.join(tdir, "knowledge"), exist_ok=True)
+    with open(entry, "w", encoding="utf-8") as fh:
+        fh.write(body)
+    _upsert_index(idx, lines, h, slug, desc)
+    sys.stdout.write("%s: %sd %s\n" % (PROG, verb, slug))
+
+
+def remove_entry(vault, cfg, slug):
+    valid_slug(slug)
+    tdir = topic_dir(vault, cfg)
+    entry = os.path.join(tdir, "knowledge", slug + ".md")
+    if not os.path.exists(entry):
+        die("entry %r not found" % slug)
+    idx = _index_path(tdir)
+    pat = re.compile(r"^- \[%s\]\(knowledge/%s\.md\) — " % (re.escape(slug), re.escape(slug)))
+    lines = open(idx, encoding="utf-8").read().split("\n")
+    os.remove(entry)
+    with open(idx, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(l for l in lines if not pat.match(l)))
+    sys.stdout.write("%s: removed %s\n" % (PROG, slug))
+
+
+def locate(vault, cfg, slug):
+    tdir = topic_dir(vault, cfg)
+    sys.stdout.write("topic: %s\n" % tdir)
+    sys.stdout.write("index: %s\n" % os.path.join(tdir, "INDEX.md"))
+    if slug:
+        valid_slug(slug)
+        sys.stdout.write("entry: %s\n" % os.path.join(tdir, "knowledge", slug + ".md"))
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(prog=PROG, description="Shared KB operations engine.")
+    p.add_argument("--config", required=True, help="per-sibling config file (key = value)")
+    p.add_argument("--vault", required=True, help="vault root holding the per-topic folders")
+    sub = p.add_subparsers(dest="op", required=True)
+    for op in ("capture", "refresh"):
+        s = sub.add_parser(op, help="%s an entry (markdown on stdin)" % op)
+        s.add_argument("slug")
+    s = sub.add_parser("remove", help="remove an entry")
+    s.add_argument("slug")
+    s = sub.add_parser("locate", help="print the resolved topic/index/entry paths")
+    s.add_argument("slug", nargs="?")
+    args = p.parse_args(argv)
+
+    cfg = load_config(args.config)
+    if args.op in ("capture", "refresh"):
+        write_entry(args.op, args.vault, cfg, args.slug)
+    elif args.op == "remove":
+        remove_entry(args.vault, cfg, args.slug)
+    elif args.op == "locate":
+        locate(args.vault, cfg, args.slug)
+
+
+if __name__ == "__main__":
+    main()

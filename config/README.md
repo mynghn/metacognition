@@ -4,4 +4,4 @@ The **thin per-sibling config** the [`engine/`](../engine) consumes — one entr
 
 A sibling's whole surface is `{ template + config + description }` (DESIGN Decision-8) — this directory holds the `config` half.
 
-DESIGN Decision-3 (shared-operations-engine). Populated by feature `0004`, tasks E1 (schema) / M2 (the three shipped siblings); extended by the generator (`0005`).
+DESIGN Decision-3 (shared-operations-engine). The field schema lives in [`../templates/sibling-config.schema.md`](../templates/sibling-config.schema.md) (added in E1); per-sibling instances are authored in M2 (the three shipped siblings) and by the generator (`0005`).
