@@ -35,7 +35,7 @@ Every `capture`/`refresh`/`remove` carries the skill's `Heal-*` trailers. The en
 vocabulary-free — this schema is the skill's, recorded as generic git trailers:
 
 ```
---trailer Heal-verdict:current|dead-link|policy-fix|stale|split|merge|retire
+--trailer Heal-verdict:current|dead-link|policy-fix|stale|degraded|split|merge|retire
 --trailer Heal-mode:auto|ratified          # auto path → auto; proposal path → ratified
 --trailer Heal-confidence:<0..1>
 --trailer Sources-before:<url>, ...
@@ -101,13 +101,13 @@ without that merge.
    git -C @VAULT@ branch -D proposal/<tier>-<slug>-<n>
    ```
 
-### Lighter path for a single claim-change
+### Lighter path for a single ratifiable change
 
-A *single* T1 claim-change need not spin up a worktree: present the proposed `git diff` (render
-the reconciled entry and diff it against the current one), and **on the maintainer's yes**,
-`refresh` on `main` directly with `Heal-mode:ratified`. Same gate, same provenance, one commit —
-just no worktree for a one-commit change. Use the full worktree flow whenever the change is
-multi-verb or structural.
+A *single*, one-commit, non-structural change that needs ratification — a T1 claim-change, or a T1
+degrade (quarantine) — need not spin up a worktree: present the proposed `git diff` (render the
+candidate entry and diff it against the current one), and **on the maintainer's yes**, `refresh` on
+`main` directly with `Heal-mode:ratified`. Same gate, same provenance, one commit — just no worktree
+for a one-commit change. Use the full worktree flow whenever the change is multi-verb or structural.
 
 ## Restartable composite-op applier
 

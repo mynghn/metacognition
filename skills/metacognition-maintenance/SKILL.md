@@ -45,7 +45,8 @@ pass surfaces *candidates*, it never acts.
 1. **Scope the targets** — from the maintainer's request, or from a health-pass worklist (a
    `[dead-link]` / `[over-age]` / `[sub-tier]` line names an entry to heal).
 2. **Classify the tier**:
-   - **T1 — heal** one entry: reconcile it in place against current sources.
+   - **T1 — heal** one entry: reconcile it in place against current sources, routing the result
+     auto / proposal / quarantine. See **`references/heal-t1.md`**.
    - **T2 — sibling evolution**: re-derive the *whole* sibling, emitting a keep/refresh/split/
      merge/retire/re-scope diff. Never a blind single-entry insert.
    - **T3 — family evolution**: add/merge/retire a sibling or move a boundary, with the
@@ -75,6 +76,8 @@ pass surfaces *candidates*, it never acts.
   ratify/reject, restartable composite applier, provenance schema. **Read before any write.**
 - **`references/verification.md`** — the verification envelope: citation re-fetch, the
   no-net-loss diff, and the default-REJECT adversarial quorum. **Read before any write.**
+- **`references/heal-t1.md`** — the **T1 heal** procedure: signal→route mapping and the
+  auto / proposal / quarantine outcomes for one entry. Read when healing a single entry.
 
-> Tier-specific procedures (T1 heal, T2 sibling, T3 family) are added as their references land;
-> until then, follow the spine + envelope above and the two laws.
+> T2 (sibling) and T3 (family) procedures are added as their references land; until then, follow
+> the spine + envelope above, the T1 reference for single-entry heals, and the two laws.

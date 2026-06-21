@@ -31,6 +31,11 @@ Each test pins one load-bearing property of the spine:
   - AUTO PATH: a claim-preserving heal commits straight to main with `Heal-mode: auto` and no
     worktree. This pins the mechanical WRITE path only — the gate's CLASSIFICATION (which change
     is auto vs proposal) is skill judgment/prose, not engine code, so it is out of this harness.
+  - QUARANTINE WRITE (T1, W3): a sub-bar source WITHOUT a degraded marker is refused (never written
+    dirty); the SAME entry carrying a `degraded:` marker is admitted, lands one commit on main with
+    the `⚠` INDEX down-rank and `Heal-verdict: degraded` provenance. Pins the degraded write through
+    the skill's refresh+provenance route end-to-end (the engine's degraded-admit + ⚠ unit lives in
+    engine/selftest); the route CHOICE (quarantine → proposal) is skill prose, out of this harness.
 """
 import os
 import re
@@ -298,6 +303,34 @@ def main():
               int(git(vault, "rev-list", "--count", "HEAD").stdout) == before + 1)
         check("auto commit carries Heal-mode: auto",
               "Heal-mode: auto" in git(vault, "log", "-1", "--format=%B").stdout)
+
+        # === QUARANTINE (T1 / W3): a degraded refresh lands on main with the ⚠ down-rank and
+        # Heal-* provenance through the skill's route — and a sub-bar source WITHOUT the marker is
+        # refused (never written dirty). The engine's degraded-admit + ⚠ unit is pinned in
+        # engine/selftest; this pins it end-to-end through the maintenance refresh+provenance route,
+        # which is W3's degraded-quarantine acceptance criterion. The route CHOICE (quarantine ->
+        # proposal, Heal-mode: ratified) is skill prose, not engine code, so it is out of this harness.
+        subbar = ('---\nname: alpha\ndescription: trigger for alpha\nlast_refreshed: 2026-06-20\n'
+                  'sources:\n  - Author, "Decayed", 2026 — https://medium.com/x\n%s---\n\n%s\n')
+        dirty = run(cfg, vault, sources, ["refresh", "alpha", "--trailer", "Heal-mode:auto"],
+                    subbar % ("", "Alpha with only a sub-bar source and no degraded marker."))
+        check("sub-bar refresh WITHOUT a degraded marker is refused (not written dirty)",
+              dirty.returncode != 0 and "source authority" in dirty.stderr, dirty.stderr)
+        before_q = int(git(vault, "rev-list", "--count", "HEAD").stdout)
+        rq = run(cfg, vault, sources,
+                 ["refresh", "alpha", "--trailer", "Heal-mode:ratified", "--trailer", "Heal-verdict:degraded"],
+                 subbar % ('degraded: "sole source medium.com below the bar; no replacement found"\n',
+                           "Alpha, quarantined: its only source decayed below the bar."))
+        check("degraded refresh is admitted via the quarantine exemption", rq.returncode == 0, rq.stderr)
+        # The ratified lighter-path write (skill routes quarantine -> proposal); the one commit lands
+        # on main on the maintainer's yes — NOT an auto write (which the round-1 design removed).
+        check("quarantine ratified-refresh adds exactly one commit to main",
+              int(git(vault, "rev-list", "--count", "HEAD").stdout) == before_q + 1)
+        check("quarantined entry is ⚠-down-ranked in INDEX",
+              "- ⚠ [alpha](knowledge/alpha.md)" in git(vault, "show", "HEAD:test-topic/INDEX.md").stdout)
+        qbody = git(vault, "log", "-1", "--format=%B").stdout
+        check("quarantine commit carries Heal-verdict: degraded + Heal-mode: ratified",
+              "Heal-verdict: degraded" in qbody and "Heal-mode: ratified" in qbody, qbody)
     finally:
         shutil.rmtree(root, ignore_errors=True)
 

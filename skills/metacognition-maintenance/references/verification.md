@@ -55,12 +55,29 @@ correct?", not "is it plausible?"). Every reviewer checks:
   updated against a re-fetched source, a link retired deliberately) or silent loss?
 - **Scope drift** — does the entry still sit within its declared `description` boundary, or has it
   quietly become a different entry? (A `description-changed` flag is the prompt to check this.)
+- **Corroboration** — a load-bearing number the heal introduces or changes MUST carry at least one
+  corroborating source (≥2 distinct supporting sources for that number). This is *not* what Support
+  checks (Support confirms one citation backs a claim; this counts the distinct sources behind a
+  number). Nothing mechanical enforces it — the engine's source-gate tests authority, not
+  corroboration, and the deterministic detectors do not flag it — so the reviewers are the **sole**
+  enforcement: a single-sourced load-bearing number is a REJECT.
+- **Degrade justification** *(only when the candidate carries a `degraded:` marker)* — the marker
+  asserts a *negative*: that no at-or-above source backs the claim. That negative was found by the
+  reconciler and nothing else re-checks it, so each reviewer **independently attempts the at-or-above
+  search**. If any reviewer finds a qualifying live source, the degrade is wrong — REJECT it so the
+  heal becomes a policy-fix (re-source) instead; the degrade stands only when the quorum also fails
+  to find one.
 
-A reviewer votes **REJECT** if it finds any silent loss, scope drift, or unsupported citation, or
-cannot demonstrate the candidate correct on at least one load-bearing claim.
+A reviewer votes **REJECT** if it finds any silent loss, scope drift, unsupported citation, or
+single-sourced load-bearing number; if (for a degraded candidate) it finds an at-or-above source the
+degrade missed; or if it cannot demonstrate the candidate correct on at least one load-bearing claim.
 
 **Aggregate (default-REJECT): a majority-REJECT FAILS the candidate; only a majority accept clears
-it** (odd N + binary votes → there is never a tie). On failure:
+it** (odd N + binary votes → there is never a tie). **One exception — the Degrade-justification find
+is dispositive:** a *single* reviewer surfacing a qualifying live source fails the degrade (re-route
+it to a policy-fix re-source), not subject to the majority — finding a source positively *disproves*
+the "no source exists" negative, whereas no reviewer finding one never *confirms* it (which is why a
+surviving degrade still goes to human ratification, not auto). On failure:
 
 - a candidate routed to the **auto** path is **downgraded to the proposal path** (committed to a
   `proposal/...` branch for human ratification — see `propose-on-branch.md`), never auto-written;
