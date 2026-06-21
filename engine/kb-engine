@@ -152,25 +152,57 @@ def _rollback(vault, rels):
                 pass
 
 
-def commit_change(vault, cfg, slug, verb):
+def parse_trailers(raw):
+    """Parse repeated `--trailer KEY:VALUE` strings into ordered (key, value) git-trailer
+    pairs (or None when unset). Split on the FIRST colon so a URL value keeps its own colons
+    (`Sources-after:https://…`). KEY must be a git-trailer token; a malformed key or a
+    multi-line value is rejected here, before any write — a bad provenance arg must fail loudly,
+    never silently degrade into ordinary commit-body text that `git log` won't parse back."""
+    if not raw:
+        return None
+    out = []
+    for item in raw:
+        if ":" not in item:
+            die("--trailer must be KEY:VALUE, got %r" % item)
+        k, v = item.split(":", 1)
+        k, v = k.strip(), v.strip()
+        if not re.match(r"^[A-Za-z][A-Za-z0-9-]*$", k):
+            die("--trailer key %r is not a valid git-trailer token (letters, digits, '-')" % k)
+        if "\n" in v:
+            die("--trailer value for %r must be single-line" % k)
+        out.append((k, v))
+    return out
+
+
+def commit_change(vault, cfg, slug, verb, provenance=None):
     """Stage the entry + INDEX and record exactly one commit in the vault repo's history,
     scoped to those two paths. The mutation and its commit are one engine step — a single
     controlled channel: on any git failure the working tree is rolled back to HEAD, so a half-written change can
-    never persist, and git errors surface as a clean message rather than a Python traceback."""
+    never persist, and git errors surface as a clean message rather than a Python traceback.
+
+    `provenance` — an ordered list of (key, value) git-trailer pairs, or None — appends
+    structured trailers after the subject (`git commit -m <subject> -m <trailers>`) so an
+    automated heal/evolution commit is self-describing and auditable straight from `git log`.
+    Change history lives in git, not frontmatter (which holds current state, not why a change
+    happened). None reproduces the bare `<stem>: <verb> <slug>` subject byte-for-byte, so a
+    human CLI write is unchanged. The engine stays generic about WHICH trailers it records —
+    the heal vocabulary (Heal-verdict, Heal-mode, Sources-before/after, …) is the caller's
+    schema, not the engine's, so the shared writer never learns one feature's words."""
     rels = [
         os.path.join(cfg["stem"], "knowledge", slug + ".md"),
         os.path.join(cfg["stem"], "INDEX.md"),
     ]
+    commit_cmd = ["git", "-C", vault, "commit", "-q", "-m", "%s: %s %s" % (cfg["stem"], verb, slug)]
+    if provenance:
+        commit_cmd += ["-m", "\n".join("%s: %s" % (k, v) for k, v in provenance)]
+    commit_cmd += ["--"] + rels
     try:
         subprocess.run(["git", "-C", vault, "add", "--"] + rels, check=True, capture_output=True, text=True)
         # Scope the change-check AND the commit to exactly these two paths (`-- rels`), so the
         # op's commit can never sweep in an unrelated already-staged change in the vault.
         if subprocess.run(["git", "-C", vault, "diff", "--cached", "--quiet", "--"] + rels).returncode == 0:
             die("nothing changed for %r — no commit made" % slug)
-        subprocess.run(
-            ["git", "-C", vault, "commit", "-q", "-m", "%s: %s %s" % (cfg["stem"], verb, slug), "--"] + rels,
-            check=True, capture_output=True, text=True,
-        )
+        subprocess.run(commit_cmd, check=True, capture_output=True, text=True)
     except FileNotFoundError:
         die("git not found on PATH — install git or fix PATH")
     except subprocess.CalledProcessError as exc:
@@ -249,7 +281,7 @@ def _upsert_index(idx, lines, h, slug, desc):
         fh.write("\n".join(out))
 
 
-def write_entry(verb, vault, cfg, slug):
+def write_entry(verb, vault, cfg, slug, provenance=None):
     valid_slug(slug)
     _require_git_repo(vault)
     tdir = topic_dir(vault, cfg)
@@ -280,12 +312,12 @@ def write_entry(verb, vault, cfg, slug):
     with open(entry, "w", encoding="utf-8") as fh:
         fh.write(body)
     _upsert_index(idx, lines, h, slug, desc)
-    sha = commit_change(vault, cfg, slug, verb)
+    sha = commit_change(vault, cfg, slug, verb, provenance)
     past = verb + ("d" if verb.endswith("e") else "ed")  # capture->captured, refresh->refreshed
     sys.stdout.write("%s: %s %s (%s)\n" % (PROG, past, slug, sha))
 
 
-def remove_entry(vault, cfg, slug):
+def remove_entry(vault, cfg, slug, provenance=None):
     valid_slug(slug)
     _require_git_repo(vault)
     tdir = topic_dir(vault, cfg)
@@ -298,7 +330,7 @@ def remove_entry(vault, cfg, slug):
     os.remove(entry)
     with open(idx, "w", encoding="utf-8") as fh:
         fh.write("\n".join(l for l in lines if not pat.match(l)))
-    sha = commit_change(vault, cfg, slug, "remove")
+    sha = commit_change(vault, cfg, slug, "remove", provenance)
     sys.stdout.write("%s: removed %s (%s)\n" % (PROG, slug, sha))
 
 
@@ -318,11 +350,15 @@ def main(argv=None):
     p.add_argument("--vault", help="vault repo root (default: resolved by precedence — "
                                    "$<PREFIX>_KB_VAULT / $KB_VAULT / installer config / %s)" % DEFAULT_VAULT)
     sub = p.add_subparsers(dest="op", required=True)
+    trailer_help = ("structured git-trailer provenance (repeatable), e.g. "
+                    "--trailer Heal-mode:auto — appended to the commit for audit")
     for op in ("capture", "refresh"):
         s = sub.add_parser(op, help="%s an entry (markdown on stdin)" % op)
         s.add_argument("slug")
+        s.add_argument("--trailer", action="append", metavar="KEY:VALUE", help=trailer_help)
     s = sub.add_parser("remove", help="remove an entry")
     s.add_argument("slug")
+    s.add_argument("--trailer", action="append", metavar="KEY:VALUE", help=trailer_help)
     s = sub.add_parser("locate", help="print the resolved topic/index/entry paths")
     s.add_argument("slug", nargs="?")
     args = p.parse_args(argv)
@@ -330,9 +366,9 @@ def main(argv=None):
     cfg = load_config(args.config)
     vault = resolve_vault(args.vault, cfg)
     if args.op in ("capture", "refresh"):
-        write_entry(args.op, vault, cfg, args.slug)
+        write_entry(args.op, vault, cfg, args.slug, parse_trailers(args.trailer))
     elif args.op == "remove":
-        remove_entry(vault, cfg, args.slug)
+        remove_entry(vault, cfg, args.slug, parse_trailers(args.trailer))
     elif args.op == "locate":
         locate(vault, cfg, args.slug)
 

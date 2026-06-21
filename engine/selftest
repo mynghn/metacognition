@@ -15,6 +15,9 @@ Parity (vs the legacy `*-kb` scripts):
 
 Mutation (-> the vault repo):
   - every capture / refresh / remove records EXACTLY ONE commit in the vault repo;
+  - provenance trailers round-trip out of `git log` while the subject stays the bare
+    `<stem>: <verb> <slug>` form; a no-provenance write is byte-identical to today's commit;
+    malformed `--trailer` is rejected before any write;
   - a rejected op records NO commit and leaves the tree unchanged;
   - the vault location resolves from $<PREFIX>_KB_VAULT / $KB_VAULT / default when --vault is omitted;
   - a non-git vault is refused.
@@ -180,6 +183,56 @@ def main():
         check("remove records one commit", ncommits(vault) == n + 1)
         r = run(cfg, vault, ["remove", "ghost"])
         check("remove refuses absent slug", r.returncode != 0)
+
+        # provenance trailers: an automated heal/evolution commit is self-describing — its
+        # structured trailers round-trip out of `git log`, while the subject stays the bare
+        # `<stem>: <verb> <slug>` form (provenance lives in git history, not in the subject).
+        n = ncommits(vault)
+        r = run(cfg, vault, ["capture", "healed",
+                             "--trailer", "Heal-verdict:stale",
+                             "--trailer", "Heal-mode:auto",
+                             "--trailer", "Heal-confidence:0.9",
+                             "--trailer", "Sources-before:https://old.example.com",
+                             "--trailer", "Sources-after:https://arxiv.org/abs/1, https://arxiv.org/abs/2",
+                             "--trailer", "Heal-run:run-42"],
+                VALID_ENTRY.format(slug="healed"))
+        check("capture with provenance exits 0", r.returncode == 0, r.stderr)
+        check("provenance records exactly one commit", ncommits(vault) == n + 1)
+
+        def trailer(key):
+            return git(vault, "log", "-1", "--format=%%(trailers:key=%s,valueonly)" % key).stdout.strip()
+        check("provenance: Heal-verdict recoverable from git log", trailer("Heal-verdict") == "stale", trailer("Heal-verdict"))
+        check("provenance: Heal-mode recoverable", trailer("Heal-mode") == "auto", trailer("Heal-mode"))
+        check("provenance: Heal-confidence recoverable", trailer("Heal-confidence") == "0.9", trailer("Heal-confidence"))
+        check("provenance: Sources-after preserves comma-joined urls",
+              trailer("Sources-after") == "https://arxiv.org/abs/1, https://arxiv.org/abs/2", trailer("Sources-after"))
+        check("provenance: subject stays the bare stem/verb/slug form",
+              git(vault, "log", "-1", "--format=%s").stdout.strip() == "test-topic: capture healed")
+
+        # a remove (= retire) carries provenance through the same path
+        run(cfg, vault, ["remove", "healed", "--trailer", "Heal-verdict:retire", "--trailer", "Heal-mode:ratified"])
+        check("retire (remove) carries provenance", trailer("Heal-verdict") == "retire", trailer("Heal-verdict"))
+
+        # back-compat: a no-provenance write is BYTE-IDENTICAL to today's commit message
+        # (bare subject, empty body — no trailers paragraph), so adding provenance support never
+        # silently rewrites the existing human-CLI commit shape.
+        run(cfg, vault, ["capture", "plain"], VALID_ENTRY.format(slug="plain"))
+        check("no-provenance: subject unchanged",
+              git(vault, "log", "-1", "--format=%s").stdout.strip() == "test-topic: capture plain")
+        check("no-provenance: empty body (no trailers paragraph appended)",
+              git(vault, "log", "-1", "--format=%b").stdout.strip() == "")
+        check("no-provenance: git parses zero trailers",
+              git(vault, "log", "-1", "--format=%(trailers)").stdout.strip() == "")
+
+        # malformed provenance is rejected before any write — a bad --trailer must fail loudly,
+        # never silently degrade into non-trailer commit-body text.
+        n = ncommits(vault)
+        r = run(cfg, vault, ["capture", "badtrail", "--trailer", "no-colon-here"], VALID_ENTRY.format(slug="badtrail"))
+        check("malformed --trailer (no colon) rejected", r.returncode != 0 and "KEY:VALUE" in r.stderr, r.stderr)
+        r = run(cfg, vault, ["capture", "badkey", "--trailer", "Bad Key:value"], VALID_ENTRY.format(slug="badkey"))
+        check("--trailer with non-token key rejected", r.returncode != 0 and "trailer token" in r.stderr, r.stderr)
+        check("rejected provenance wrote no entry + no commit",
+              not os.path.isfile(os.path.join(tdir, "knowledge", "badtrail.md")) and ncommits(vault) == n)
 
         # locate resolves paths (incl. the vault)
         r = run(cfg, vault, ["locate", "alpha"])
