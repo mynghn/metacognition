@@ -15,8 +15,14 @@ Vault setup: the installer git-inits the vault as a repo ROOT, records its locat
 $XDG_CONFIG_HOME/metacognition/vault, and the engine then resolves that vault with no
 --vault/env. Every install here runs in a sandboxed vault + $XDG_CONFIG_HOME so the real ~/.config
 and the live vault are never touched.
+
+Maintenance skill (W6): a full install deploys the family-level metacognition-maintenance skill
+(SKILL.md + references/) byte-identical to both providers with its @-tokens baked absolute, ships no
+extra (scheduler/trigger) artifact so nothing runs unattended, is idempotent, deploys via `--only metacognition-maintenance`
+yet is left untouched by a surgical `--only <sibling>`, and a file with an unbakeable @TOKEN@ is a clean error.
 """
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -67,6 +73,96 @@ def main():
         run(["--dest", dest])
         check("idempotent re-run", all(read(dest, ".claude", n) == snap[n] for n in NAMES))
 
+        # ---- family-level maintenance skill: byte-identical multi-file deploy + baked @-tokens (W6) ----
+        MAINT = "metacognition-maintenance"
+        msrc = os.path.join(ROOT, "skills", MAINT)
+        MFILES = sorted(os.path.relpath(os.path.join(dp, f), msrc)
+                        for dp, _, fs in os.walk(msrc) for f in fs if not f.startswith("."))
+
+        def mread(d, provider, rel):
+            return open(os.path.join(d, provider, "skills", MAINT, rel), encoding="utf-8").read()
+
+        deployed_both = all(os.path.isfile(os.path.join(dest, pr, "skills", MAINT, rel))
+                            for rel in MFILES for pr in (".claude", ".codex"))
+        check("maintenance: every file deployed to both providers, byte-identical",
+              deployed_both and all(mread(dest, ".claude", rel) == mread(dest, ".codex", rel) for rel in MFILES),
+              "files=%s" % MFILES)
+        all_text = "".join(mread(dest, ".claude", rel) for rel in MFILES)
+        check("maintenance: no unbaked @TOKEN@ remains in any deployed file",
+              not re.search(r"@[A-Z_]+@", all_text), re.findall(r"@[A-Z_]+@", all_text)[:5])
+        # every @-token's baked VALUE is present (catches a WRONGLY-substituted token, which the
+        # no-leftover-raw-token check above cannot — it only catches an UNsubstituted one).
+        expected_vals = [os.path.join(ROOT, "engine", "kb-engine"), os.path.join(ROOT, "config"),
+                         os.path.abspath(_VAULT), os.path.join(ROOT, "SOURCES.md"),
+                         os.path.join(ROOT, "health-check"), os.path.join(ROOT, "no-net-loss"),
+                         os.path.join(ROOT, "FAMILY.md"), ROOT]
+        check("maintenance: every @-token baked to its real absolute path",
+              all(v in all_text for v in expected_vals), str([v for v in expected_vals if v not in all_text]))
+        # nothing-runs-unattended: BOTH providers ship exactly SKILL.md + references/ — no scheduler/trigger
+        def shipped_set(provider):
+            sd = os.path.join(dest, provider, "skills", MAINT)
+            return sorted(os.path.relpath(os.path.join(dp, f), sd) for dp, _, fs in os.walk(sd) for f in fs)
+        check("maintenance: both providers ship only SKILL.md + references (no scheduler/auto-trigger artifact)",
+              shipped_set(".claude") == MFILES and shipped_set(".codex") == MFILES
+              and any(f.startswith("references/") for f in MFILES) and "SKILL.md" in MFILES,
+              "%s / %s" % (shipped_set(".claude"), shipped_set(".codex")))
+        # the maintenance frontmatter is shipped as-is (not rendered+quoted like KB adapters) — guard
+        # that it stays valid+discoverable: name + description present, and an UNQUOTED description has
+        # no ': ' colon-space (strict-invalid YAML that would silently break discovery).
+        fm = mread(dest, ".claude", "SKILL.md").split("---", 2)[1]
+        nm = [l for l in fm.splitlines() if l.startswith("name:")]
+        ds = [l for l in fm.splitlines() if l.startswith("description:")]
+        dval = ds[0][len("description:"):].strip() if ds else ""
+        check("maintenance: deployed frontmatter valid+discoverable (name+description, no unquoted colon-space)",
+              bool(nm and nm[0][len("name:"):].strip()) and bool(dval) and (dval.startswith('"') or ": " not in dval),
+              fm[:160])
+        snap_m = {rel: mread(dest, ".claude", rel) for rel in MFILES}
+        run(["--dest", dest])
+        check("maintenance: idempotent re-run", all(mread(dest, ".claude", rel) == snap_m[rel] for rel in MFILES))
+
+        # a renamed/removed reference must not linger — the multi-file deploy prunes orphans to source
+        d_pr = tempfile.mkdtemp(prefix="kb-install-")
+        try:
+            run(["--dest", d_pr, "--only", MAINT])
+            orphan = os.path.join(d_pr, ".claude", "skills", MAINT, "references", "_orphan_selftest.md")
+            open(orphan, "w").write("stale orphan reference")
+            run(["--dest", d_pr, "--only", MAINT])
+            check("maintenance: re-install prunes an orphan reference (deploy == source)", not os.path.exists(orphan))
+        finally:
+            shutil.rmtree(d_pr, ignore_errors=True)
+
+        # `--only metacognition-maintenance` deploys ONLY the maintenance skill (no sibling adapters)
+        d_m = tempfile.mkdtemp(prefix="kb-install-")
+        try:
+            rm = run(["--dest", d_m, "--only", MAINT])
+            sdir = os.path.join(d_m, ".claude", "skills")
+            present = sorted(os.listdir(sdir)) if os.path.isdir(sdir) else []
+            check("--only maintenance: deploys just the maintenance skill",
+                  rm.returncode == 0 and present == [MAINT], "%s / %s" % (rm.stderr.strip(), present))
+        finally:
+            shutil.rmtree(d_m, ignore_errors=True)
+
+        # a surgical `--only <sibling>` must NOT deploy the family-level maintenance skill
+        d_surgm = tempfile.mkdtemp(prefix="kb-install-")
+        try:
+            run(["--dest", d_surgm, "--only", "tool-design"])
+            check("--only sibling: maintenance skill left untouched (surgical)",
+                  not os.path.isdir(os.path.join(d_surgm, ".claude", "skills", MAINT)))
+        finally:
+            shutil.rmtree(d_surgm, ignore_errors=True)
+
+        # an unbakeable @TOKEN@ in a maintenance file -> clean error (never ship a broken path)
+        bogus = os.path.join(msrc, "references", "_selftest_bogus.md")
+        open(bogus, "w").write("this references @BOGUS_TOKEN@ which no installer token resolves\n")
+        d_bog = tempfile.mkdtemp(prefix="kb-install-")
+        try:
+            rb = run(["--dest", d_bog, "--only", MAINT])
+            check("maintenance: unbaked token -> clean error (no traceback)",
+                  rb.returncode != 0 and "unbaked token" in rb.stderr and "Traceback" not in rb.stderr, rb.stderr)
+        finally:
+            os.remove(bogus)
+            shutil.rmtree(d_bog, ignore_errors=True)
+
         d2 = tempfile.mkdtemp(prefix="kb-install-")
         try:
             r = run(["--dest", d2, "--only", "context-engineering-knowledge-base"])
@@ -86,7 +182,14 @@ def main():
             try:
                 r = run(["--dest", d3])
                 installed = sorted(os.listdir(os.path.join(d3, ".claude", "skills"))) if os.path.isdir(os.path.join(d3, ".claude", "skills")) else []
-                check("stray .DS_Store skipped", r.returncode == 0 and installed == sorted(NAMES), "%s / %s" % (r.stderr.strip(), installed))
+                # Intent: the stray dotfile is skipped, never mis-treated as a sibling. Asserted
+                # robustly (not `== NAMES`, which is stale now config/ holds >3 siblings + the
+                # family-level maintenance skill): the known siblings + maintenance are present and
+                # NO entry derives from the dotfile.
+                check("stray .DS_Store skipped",
+                      r.returncode == 0 and set(NAMES) <= set(installed) and "metacognition-maintenance" in installed
+                      and not any(s.startswith(".") or "DS_Store" in s for s in installed),
+                      "%s / %s" % (r.stderr.strip(), installed))
             finally:
                 shutil.rmtree(d3, ignore_errors=True)
         finally:
