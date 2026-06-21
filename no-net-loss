@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+"""no-net-loss — deterministic guard against silent knowledge loss in a heal/reconciliation.
+
+The maintenance skill's verification envelope leans on an LLM to reconcile an entry against
+current sources. You must NOT guard that LLM's own failure modes with the same LLM's judgment, so
+this is the deterministic floor of the no-net-loss check: given the PRIOR entry and the CANDIDATE
+reconciliation, it reports what the candidate DROPPED relative to the prior — every dropped
+`[[wikilink]]`, dropped load-bearing number, and dropped citation source (by host) — and whether
+the `description` (the entry's declared scope boundary) changed. It writes nothing and fetches nothing.
+
+It is a FLOOR, not a ceiling — only MECHANIZABLE losses are caught. A number is "load-bearing"
+per engine/sources.py: a suffixed %/$/x/k-m-b figure, a 4+-digit integer, or a decimal — NOT a
+bare 1-3 digit count ("3 reviewers", "350 ms"), and NOT a 1900-2099 magnitude (read as a year). A
+dropped source is matched by HOST, so swapping one paper for another on the SAME host is not
+flagged. A prose claim carrying no number/link/source, and these finer losses, are the independent
+reviewers' job (verification.md), not this tool's.
+
+A drop is not automatically wrong — a heal legitimately supersedes a stale claim (7 -> 42) or
+retires a dead cross-link. But a drop must be an EXPLICIT, reviewed supersession, never a silent
+side effect of rewriting. So this surfaces every drop deterministically; the skill (and its
+adversarial quorum) adjudicates whether each is a sanctioned supersession. Exit is nonzero when
+anything was dropped — the envelope treats that as "stop and justify or fix", never write dirty.
+
+Shares engine/sources.py with the write-gate and health-check — one parser for load-bearing
+numbers and frontmatter, so what this flags as a dropped number is exactly what the family counts
+as a load-bearing number elsewhere. A description change is advisory (a heal may legitimately
+refine scope) — reported for the boundary-drift review, it does not by itself fail the check.
+"""
+import argparse
+import os
+import re
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "engine"))
+import sources  # shared: split_frontmatter, load_bearing_numbers, _field-style frontmatter reads
+
+PROG = "no-net-loss"
+_WIKILINK_RE = re.compile(r"\[\[([^\]\n]+?)\]\]")
+
+
+def warn(msg):
+    sys.stderr.write("%s: %s\n" % (PROG, msg))
+
+
+def wikilinks(body):
+    """Ordered, de-duplicated `[[target]]` cross-links in the entry's prose body (frontmatter
+    stripped). A target's surrounding context is ignored — a link is present or it is not."""
+    _, prose = sources.split_frontmatter(body)
+    seen, out = set(), []
+    for m in _WIKILINK_RE.finditer(prose):
+        t = m.group(1).strip()
+        if t and t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
+def description(body):
+    fm, _ = sources.split_frontmatter(body)
+    m = re.search(r"(?m)^description:[ \t]*(.+?)[ \t]*$", fm)
+    return m.group(1).strip() if m else None
+
+
+def dropped(prior_items, cand_items):
+    """Items present in prior, absent in candidate — order preserved from prior."""
+    cand = set(cand_items)
+    return [x for x in prior_items if x not in cand]
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(prog=PROG, description="Deterministic no-net-loss diff (read-only).")
+    p.add_argument("prior", help="path to the PRIOR (current) entry markdown")
+    p.add_argument("candidate", help="path to the CANDIDATE (reconciled) entry markdown")
+    args = p.parse_args(argv)
+    for path in (args.prior, args.candidate):
+        if not os.path.isfile(path):
+            warn("file not found: %s" % path)
+            return 2
+    prior = open(args.prior, encoding="utf-8").read()
+    cand = open(args.candidate, encoding="utf-8").read()
+
+    lost_links = dropped(wikilinks(prior), wikilinks(cand))
+    lost_nums = dropped(sources.load_bearing_numbers(prior), sources.load_bearing_numbers(cand))
+    # A dropped citation source is a silent loss too — halving a load-bearing claim's corroboration
+    # passes the engine authority gate (one surviving allowlisted host is enough) and is never a
+    # "new or changed" citation for the envelope's re-fetch, so this is the only place it surfaces.
+    # Host-level via the shared parser (one-parser invariant); a same-host paper swap is the
+    # reviewers' job, not the tool's.
+    lost_sources = dropped(sources.source_hosts(prior), sources.source_hosts(cand))
+    desc_prior, desc_cand = description(prior), description(cand)
+
+    for link in lost_links:
+        sys.stdout.write("dropped-link: [[%s]]\n" % link)
+    for num in lost_nums:
+        sys.stdout.write("dropped-number: %s\n" % num)
+    for host in lost_sources:
+        sys.stdout.write("dropped-source: %s\n" % host)
+    if desc_prior != desc_cand:
+        # Advisory: a description change may be a legitimate scope refinement OR boundary drift —
+        # the skill reviews it. It does not by itself fail the check.
+        sys.stdout.write("description-changed: %r -> %r\n" % (desc_prior, desc_cand))
+
+    dropped_count = len(lost_links) + len(lost_nums) + len(lost_sources)
+    warn("%d dropped (%d link(s), %d number(s), %d source(s)); description %s"
+         % (dropped_count, len(lost_links), len(lost_nums), len(lost_sources),
+            "changed" if desc_prior != desc_cand else "unchanged"))
+    # Nonzero iff something was dropped — the envelope must stop and justify each drop as an
+    # explicit supersession (or fix the reconciliation) before writing. A bare description change
+    # is advisory and does NOT fail on its own.
+    return 1 if dropped_count else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

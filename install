@@ -7,14 +7,17 @@ the SAME adapter into both `~/.claude/skills/<name>/` and `~/.codex/skills/<name
 plugin, no privileged agent, the two providers never diverge. Replaces the chezmoi
 `.chezmoitemplates` single-sourcing.
 
-It does three things: render each sibling's adapter and deploy the byte-identical adapter to
+It does four things: render each sibling's adapter and deploy the byte-identical adapter to
 both providers; emit the tier-gated discovery wiring — the `description` into both adapters
 always, plus, for Everyday-tier siblings only, a named trigger block upserted into the shared
 `AGENTS.md` (which both `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` symlink to; `tier` comes
-from the per-sibling config); and set up the vault — ensure it is a git repo ROOT and record its
-location where the engine resolves it, so a clean clone-and-install needs no personal config. The
-body's engine/config/vault paths are baked absolute at install time, so a rendered adapter is
-machine-specific while its source stays generic.
+from the per-sibling config); set up the vault — ensure it is a git repo ROOT and record its
+location where the engine resolves it, so a clean clone-and-install needs no personal config; and
+deploy the family-level maintenance skill (`metacognition-maintenance`) byte-identical to both
+providers, baking its engine/policy/registry `@`-tokens absolute (it is a multi-file skill copied
+as-is, not a template-rendered adapter; no scheduler is installed — discovery is its `SKILL.md`
+description alone, so nothing runs unattended). The body's engine/config/vault paths are baked absolute at install time,
+so a rendered adapter (and the maintenance skill) is machine-specific while its source stays generic.
 
 The AGENTS.md emission is SURGICAL: it inserts-or-replaces only its own named `<tag>...</tag>`
 span and leaves every other block (the user's operating instructions) byte-for-byte untouched,
@@ -37,6 +40,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_VAULT = "~/.local/share/metacognition-vault"
 PROVIDERS = (".claude", ".codex")  # both get the byte-identical adapter
 TIERS = ("everyday", "common", "situational")  # discovery-wiring gate; only `everyday` emits an AGENTS.md block
+MAINTENANCE = "metacognition-maintenance"  # the family-level maintenance skill (multi-file, token-baked)
 
 
 def parse_kv(path):
@@ -204,6 +208,79 @@ def record_vault_location(vault):
     return conf
 
 
+def maintenance_tokens(vault):
+    """The engine/policy/registry @-tokens the maintenance skill is baked against — all absolute at
+    install time, so a deployed copy is machine-specific while its source stays generic (the mirror of
+    how the KB adapters bake @ENGINE@/@INDEX@). `@FAMILY_REPO@` is the engine repo root (`ROOT`); the
+    vault is the one separate repo."""
+    return (
+        ("@ENGINE_BIN@", os.path.join(ROOT, "engine", "kb-engine")),
+        ("@CONFIG_DIR@", os.path.join(ROOT, "config")),
+        ("@VAULT@", os.path.abspath(os.path.expanduser(vault))),
+        ("@SOURCES@", os.path.join(ROOT, "SOURCES.md")),
+        ("@HEALTH_CHECK@", os.path.join(ROOT, "health-check")),
+        ("@NO_NET_LOSS@", os.path.join(ROOT, "no-net-loss")),
+        ("@FAMILY@", os.path.join(ROOT, "FAMILY.md")),
+        ("@FAMILY_REPO@", ROOT),
+    )
+
+
+def deploy_maintenance(dest, vault):
+    """Deploy the family-level maintenance skill byte-identical to BOTH providers, baking the @-tokens
+    absolute. Unlike a KB sibling (one adapter rendered from a template), this is a multi-file skill
+    (SKILL.md + references/) shipped as-is with the same token substitution applied to every file. No
+    scheduler/trigger artifact is written — discovery is the SKILL.md description alone, so nothing
+    runs unattended. Unlike the additive single-file adapters, this multi-file deploy is made
+    byte-equal to source: it prunes any orphan left in its own dest dir by a prior install (a renamed/
+    removed reference), since the on-demand-load contract makes a stale references/*.md reachable."""
+    src = os.path.join(ROOT, "skills", MAINTENANCE)
+    if not os.path.isdir(src):
+        raise SystemExit("install: maintenance skill not found at %s" % src)
+    tokens = maintenance_tokens(vault)
+    rendered = []  # (relpath, baked-content) for every file under the skill dir
+    for dirpath, dirnames, filenames in os.walk(src):
+        dirnames.sort()
+        for fn in sorted(filenames):
+            if fn.startswith("."):  # skip .DS_Store and friends
+                continue
+            full = os.path.join(dirpath, fn)
+            rel = os.path.relpath(full, src)
+            text = open(full, encoding="utf-8").read()
+            for token, value in tokens:
+                text = text.replace(token, value)
+            leftover = sorted(set(re.findall(r"@[A-Z_]+@", text)))
+            if leftover:  # an unbaked token would ship a broken path — fail fast, never deploy it
+                raise SystemExit("install: %s/%s has unbaked token(s) %s — add them to maintenance_tokens()"
+                                 % (MAINTENANCE, rel, ", ".join(leftover)))
+            rendered.append((rel, text))
+    keep = {rel for rel, _ in rendered}
+    for provider in PROVIDERS:
+        base = os.path.join(dest, provider, "skills", MAINTENANCE)
+        # Prune orphans first so a renamed/removed reference does not linger in the deployed
+        # multi-file skill (its SKILL.md tells agents to load references on demand, so a stale
+        # references/*.md is reachable). Scoped to this skill's own dir — never touches other
+        # skills or user files. This makes a multi-file deploy byte-equal to source, not additive.
+        if os.path.isdir(base):
+            for dp, _, fs in os.walk(base, topdown=False):
+                for f in fs:
+                    full = os.path.join(dp, f)
+                    if os.path.relpath(full, base) not in keep:
+                        os.remove(full)
+                if dp != base and not os.listdir(dp):
+                    os.rmdir(dp)
+        for rel, text in rendered:
+            target = os.path.join(base, rel)
+            try:
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                with open(target, "w", encoding="utf-8") as fh:
+                    fh.write(text)
+            except OSError as err:
+                raise SystemExit("install: cannot write %s/skills/%s/%s under --dest %s — %s"
+                                 % (provider, MAINTENANCE, rel, dest, err))
+    print("install: %s -> %s  (%d files, tokens baked)"
+          % (MAINTENANCE, ", ".join("%s/skills/%s" % (pr, MAINTENANCE) for pr in PROVIDERS), len(rendered)))
+
+
 def siblings():
     """Sibling config files: skip the README, dotfiles (e.g. macOS .DS_Store), and any file
     that isn't a real config (no `stem`), so a stray file never derails the whole install."""
@@ -227,11 +304,18 @@ def main():
     p.add_argument("--only", help="install just this sibling (config/ stem or full skill name)")
     args = p.parse_args()
     dest = os.path.expanduser(args.dest)
+    # Normalise the vault to ONE absolute path up front, so every consumer bakes the same string —
+    # the KB adapters (@INDEX@/@KNOWLEDGE@), the maintenance skill (@VAULT@), and the engine-recorded
+    # location. (render_adapter only expanduser'd, so a relative --vault used to bake a relative path
+    # there while the engine recorded an absolute one — a latent mismatch.)
+    args.vault = os.path.abspath(os.path.expanduser(args.vault))
 
     only = args.only
     if only and only.endswith("-knowledge-base"):
         only = only[: -len("-knowledge-base")]  # accept the printed skill name too
-    targets = [only] if only else siblings()
+    # The maintenance skill is family-level, not a config sibling — `--only metacognition-maintenance`
+    # targets just it; a full run deploys it too; a surgical `--only <sibling>` leaves it alone.
+    targets = [] if only == MAINTENANCE else ([only] if only else siblings())
     agents_path = os.path.join(dest, "AGENTS.md")  # the shared file both providers symlink to
     for sibling in targets:
         name, adapter, block = render_adapter(sibling, args.vault)
@@ -253,6 +337,11 @@ def main():
     vault = ensure_vault_repo(args.vault)
     conf = record_vault_location(vault)
     print("install: vault -> %s  (recorded in %s)" % (vault, conf))
+
+    # family-level maintenance skill: a full run or an explicit `--only metacognition-maintenance`
+    # deploys it; a surgical `--only <sibling>` does not.
+    if not only or only == MAINTENANCE:
+        deploy_maintenance(dest, vault)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,225 @@
+#!/usr/bin/env python3
+"""health-check — deterministic decay detector for the Metacognition vault.
+
+Emits a worklist of entries flagged by three JUDGMENT-FREE mechanical signals; it writes
+NOTHING to the vault and calls NO model, so detection never enters the expensive research path
+and never gates normal vault operations — it runs out-of-band, on its own invocation:
+  1. reachability — HEAD each cited URL (GET-retry on a HEAD-hostile 403/405/429). A genuinely
+     non-resolving reference (404/410, or no connection at all) is [dead-link]; a host that merely
+     REFUSES the automated check — a persistent 403/405/429 even after the GET-retry — is
+     [unverifiable], NOT [dead-link] (a refused bot is not proof the page is gone; bot-hostile hosts
+     like medium/openai/ragas live here, so a human should eyeball it rather than treat it as decay).
+  2. age x volatility — (today - last_refreshed) vs the topic's `volatility` (days) from
+     config/<stem>; past the threshold is [over-age].
+  3. source-lint — each citation host vs the SOURCES.md allowlist; a sub-allowlist host is
+     [sub-tier]. Shares engine/sources.py with the write-gate, so the bar detection flags
+     against is byte-identical to the bar a write must clear — they can never drift.
+
+Output: one line per flagged entry, `<stem>/<slug>: [dead-link <url>] [unverifiable <url>] [over-age <days>d] [sub-tier <host>]`.
+A clean entry produces no line. The vault is read-only throughout (no git, no file writes).
+"""
+import argparse
+import concurrent.futures
+import datetime
+import os
+import re
+import sys
+import urllib.error
+import urllib.request
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "engine"))
+import sources  # shared SOURCES.md policy logic — one parser for the write-gate and this lint
+
+PROG = "health-check"
+ROOT = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_VOLATILITY = 365
+_FULL_URL_RE = re.compile(r"https?://[^\s)\"'>\]]+", re.I)
+
+
+def warn(msg):
+    sys.stderr.write("%s: %s\n" % (PROG, msg))
+
+
+def load_config(path):
+    """Parse a flat `key = value` config (the same shape the engine consumes)."""
+    cfg = {}
+    with open(path, encoding="utf-8") as fh:
+        for raw in fh:
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            cfg[k.strip()] = v.strip()
+    return cfg
+
+
+def resolve_vault(explicit):
+    """Family-level vault resolution matching the engine's contract for the standard single-
+    vault deployment: --vault > $KB_VAULT > installer config > default. (The engine's per-sibling
+    $<PREFIX>_KB_VAULT escape hatch is not honored here — a whole-vault scan reads one vault.)"""
+    for cand in (explicit, os.environ.get("KB_VAULT")):
+        if cand and cand.strip():
+            return os.path.abspath(os.path.expanduser(cand.strip()))
+    conf = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
+                        "metacognition", "vault")
+    if os.path.isfile(conf):
+        val = open(conf, encoding="utf-8").read().strip()
+        if val:
+            return os.path.abspath(os.path.expanduser(val))
+    return os.path.expanduser("~/.local/share/metacognition-vault")
+
+
+def _field(fm, name):
+    m = re.search(r"(?m)^%s:[ \t]*(.+?)[ \t]*$" % name, fm)
+    return m.group(1).strip() if m else None
+
+
+def over_age_days(last_refreshed, volatility, today):
+    """Days past the volatility threshold, or None if within threshold / the date is undatable
+    (a malformed last_refreshed simply yields no age flag — age is one signal, not a validator)."""
+    try:
+        d = datetime.date.fromisoformat((last_refreshed or "").strip())
+    except (ValueError, TypeError):
+        return None
+    over = (today - d).days - volatility
+    return over if over > 0 else None
+
+
+def _status(url, method, timeout):
+    req = urllib.request.Request(url, method=method,
+                                 headers={"User-Agent": "metacognition-health-check"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return getattr(resp, "status", None) or resp.getcode()
+    except urllib.error.HTTPError as exc:
+        return exc.code
+    except Exception:
+        return None  # connection refused, DNS failure, timeout, malformed URL → unreachable
+
+
+def url_reachability(url, timeout):
+    """Classify a citation URL: 'ok' (resolves 2xx/3xx), 'unverifiable' (a bot-hostile host that
+    REFUSES the automated check — a persistent 403/405/429 even after the GET-retry: a refused bot is
+    not proof the page is gone), or 'dead' (genuinely unreachable — 404/410/other non-2xx/3xx, or no
+    connection at all). HEAD first; GET-retry on a HEAD-hostile 403/405/429 or a HEAD failure, since
+    some hosts refuse HEAD entirely. The 403/405/429 false positives the cost sweep saw (Medium,
+    ragas, openai) now surface as [unverifiable], not [dead-link] — a human verifies, not a heal."""
+    s = _status(url, "HEAD", timeout)
+    if s is None or s in (403, 405, 429):
+        g = _status(url, "GET", timeout)
+        if g is not None:
+            s = g  # a real GET response supersedes a HEAD failure / HEAD-hostile status
+    if s is None:
+        return "dead"          # no response at all (DNS / refused / timeout) → genuinely unreachable
+    if s in (403, 405, 429):
+        return "unverifiable"  # host answered with a refusal the GET-retry didn't override with a
+                               # resolving/gone status — reachable (it responded), not proven gone
+    return "ok" if 200 <= s < 400 else "dead"
+
+
+def entry_urls(body):
+    """The unique, fetchable (schemed) citation URLs in an entry's `sources:` block."""
+    fm, _ = sources.split_frontmatter(body)
+    msrc = re.search(r"(?ms)^sources:[ \t]*\n(.*?)(?=^\S|\Z)", fm + "\n")
+    block = msrc.group(1) if msrc else ""
+    seen, out = set(), []
+    for u in _FULL_URL_RE.findall(block):
+        u = u.rstrip(".,);")
+        if u not in seen:
+            seen.add(u)
+            out.append(u)
+    return out
+
+
+def collect_entries(vault, config_dir, default_volatility):
+    """Read every sibling's entries (stem, slug, body, volatility). Pure read."""
+    entries = []
+    for cfgname in sorted(os.listdir(config_dir)):
+        cpath = os.path.join(config_dir, cfgname)
+        if not os.path.isfile(cpath) or cfgname == "README.md":
+            continue
+        cfg = load_config(cpath)
+        stem = cfg.get("stem")
+        if not stem:
+            continue
+        try:
+            vol = int(cfg.get("volatility", default_volatility))
+        except ValueError:
+            vol = default_volatility
+        kdir = os.path.join(vault, stem, "knowledge")
+        if not os.path.isdir(kdir):
+            continue
+        for fn in sorted(os.listdir(kdir)):
+            if fn.endswith(".md"):
+                with open(os.path.join(kdir, fn), encoding="utf-8") as fh:
+                    entries.append((stem, fn[:-3], fh.read(), vol))
+    return entries
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(prog=PROG, description="Deterministic vault decay detector (read-only).")
+    p.add_argument("--vault", help="vault repo root (default: $KB_VAULT / installer config / standard)")
+    p.add_argument("--sources", help="source policy file (default: SOURCES.md at the repo root)")
+    p.add_argument("--config-dir", default=os.path.join(ROOT, "config"), help="per-sibling config dir")
+    p.add_argument("--offline", action="store_true", help="skip the network reachability sweep")
+    p.add_argument("--today", help="override today as YYYY-MM-DD (deterministic age testing)")
+    p.add_argument("--timeout", type=float, default=8.0, help="per-request timeout seconds")
+    p.add_argument("--workers", type=int, default=16, help="parallel reachability workers")
+    p.add_argument("--default-volatility", type=int, default=DEFAULT_VOLATILITY,
+                   help="age threshold (days) for a sibling whose config omits `volatility`")
+    args = p.parse_args(argv)
+
+    if args.today:
+        try:
+            today = datetime.date.fromisoformat(args.today)
+        except ValueError:
+            warn("invalid --today %r (expected YYYY-MM-DD)" % args.today)
+            return 2
+    else:
+        today = datetime.date.today()
+    vault = resolve_vault(args.vault)
+    if not os.path.isdir(vault):
+        warn("vault not found: %s" % vault)
+        return 2
+    patterns, found = sources.load_allowlist(sources.resolve_sources(args.sources))
+    if not found:
+        warn("source policy not found or empty — source-lint disabled for this run")
+        patterns = None
+
+    entries = collect_entries(vault, args.config_dir, args.default_volatility)
+
+    # Reachability: HEAD each UNIQUE url once, in parallel (224 citations dedupe to ~114 urls),
+    # then map verdicts back to entries. One sweep, never per-entry refetch.
+    reach = {}
+    if not args.offline:
+        urls = sorted({u for _, _, body, _ in entries for u in entry_urls(body)})
+        if urls:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.workers)) as ex:
+                for u, st in zip(urls, ex.map(lambda x: url_reachability(x, args.timeout), urls)):
+                    reach[u] = st
+
+    flagged = 0
+    for stem, slug, body, vol in entries:
+        fm, _ = sources.split_frontmatter(body)
+        tags = []
+        if not args.offline:
+            tags += ["[dead-link %s]" % u for u in entry_urls(body) if reach.get(u) == "dead"]
+            tags += ["[unverifiable %s]" % u for u in entry_urls(body) if reach.get(u) == "unverifiable"]
+        over = over_age_days(_field(fm, "last_refreshed"), vol, today)
+        if over is not None:
+            tags.append("[over-age %dd]" % over)
+        if patterns is not None:
+            tags += ["[sub-tier %s]" % h for h in sources.source_hosts(body)
+                     if not sources.host_allowed(h, patterns)]
+        if tags:
+            flagged += 1
+            sys.stdout.write("%s/%s: %s\n" % (stem, slug, " ".join(tags)))
+
+    warn("scanned %d entries across %d siblings, flagged %d%s"
+         % (len(entries), len({e[0] for e in entries}), flagged,
+            " (offline: reachability skipped)" if args.offline else ""))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

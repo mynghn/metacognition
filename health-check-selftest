@@ -1,0 +1,164 @@
+#!/usr/bin/env python3
+"""health-check-selftest — behavioral tests for the deterministic decay detector.
+
+Each test pins a behavior health-check must preserve (run after any change):
+  - reachability flags a 404 and a connection-refused URL as [dead-link], but NOT a 200 nor a
+    HEAD-hostile 405-then-GET-200 (the GET-retry); a host that REFUSES the bot persistently
+    (403/429 on HEAD AND GET) is [unverifiable], NOT [dead-link] (a refused bot is not proof the
+    page is gone); a localhost server makes this deterministic with no external network;
+  - age x volatility flags an entry past its topic's threshold as [over-age <n>d] (via --today);
+  - source-lint flags a sub-allowlist host as [sub-tier], and never a URL path filename;
+  - a clean entry produces no worklist line;
+  - the vault is never written (no commit, clean tree) and no model is called;
+  - --offline drops only the reachability signal.
+"""
+import datetime
+import http.server
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+
+HC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "health-check")
+
+_checks = []
+
+
+def check(name, ok, detail=""):
+    _checks.append(bool(ok))
+    print("  %s %s%s" % ("PASS" if ok else "FAIL", name, ("  — " + str(detail)) if detail and not ok else ""))
+
+
+class _Handler(http.server.BaseHTTPRequestHandler):
+    """200 on /ok and (GET-only) /headhostile; 405 on HEAD /headhostile to force a GET-retry;
+    /botblocked refuses persistently (403 on HEAD AND GET) and /ratelimited likewise (429) — the
+    bot-hostile case that must be [unverifiable], not [dead-link]; 404 elsewhere."""
+    def _r(self, code):
+        self.send_response(code)
+        self.end_headers()
+
+    def do_HEAD(self):
+        self._r({"/ok": 200, "/headhostile": 405, "/botblocked": 403, "/ratelimited": 429}.get(self.path, 404))
+
+    def do_GET(self):
+        self._r({"/ok": 200, "/headhostile": 200, "/botblocked": 403, "/ratelimited": 429}.get(self.path, 404))
+
+    def log_message(self, *a):
+        pass
+
+
+def git(v, *a):
+    return subprocess.run(["git", "-C", v, *a], capture_output=True, text=True)
+
+
+ENTRY = "---\nname: {slug}\ndescription: trigger for {slug}\nlast_refreshed: {date}\nsources:\n{srcs}\n---\n\nBody of {slug}.\n"
+
+
+def write_entry(kdir, slug, date, srcs):
+    with open(os.path.join(kdir, slug + ".md"), "w", encoding="utf-8") as fh:
+        fh.write(ENTRY.format(slug=slug, date=date, srcs="\n".join("  - " + s for s in srcs)))
+
+
+def run_hc(args):
+    return subprocess.run([sys.executable, HC, *args], capture_output=True, text=True)
+
+
+def by_entry(stdout):
+    return {l.split(":", 1)[0]: l for l in stdout.splitlines()}
+
+
+def main():
+    srv = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+    port = srv.server_port
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = "http://127.0.0.1:%d" % port
+    root = tempfile.mkdtemp(prefix="hc-selftest-")
+    try:
+        vault = os.path.join(root, "vault")
+        kdir = os.path.join(vault, "test-topic", "knowledge")
+        os.makedirs(kdir)
+        cfgdir = os.path.join(root, "config")
+        os.makedirs(cfgdir)
+        with open(os.path.join(cfgdir, "test-topic"), "w", encoding="utf-8") as fh:
+            fh.write("stem = test-topic\nindex_heading = Concepts\nvolatility = 30\n")
+        policy = os.path.join(root, "SOURCES.md")
+        with open(policy, "w", encoding="utf-8") as fh:
+            fh.write("# test policy\n```hosts\n127.0.0.1\narxiv.org\n```\n")
+
+        # localhost-only reachability cases (deterministic, no external network)
+        write_entry(kdir, "clean", "2026-06-20", [base + "/ok"])
+        write_entry(kdir, "dead", "2026-06-20", [base + "/ok", base + "/missing"])
+        write_entry(kdir, "refused", "2026-06-20", ["http://127.0.0.1:1/x", base + "/ok"])
+        write_entry(kdir, "headhostile", "2026-06-20", [base + "/headhostile"])
+        write_entry(kdir, "unverifiable", "2026-06-20", [base + "/botblocked", base + "/ratelimited"])
+        write_entry(kdir, "old", "2026-01-01", [base + "/ok"])
+        # a sub-tier host on a never-resolving `.invalid` domain (RFC 2606): sub-tier AND dead,
+        # both deterministic with no external server; its /path filename must NOT become a host.
+        write_entry(kdir, "subtier", "2026-06-20", [base + "/ok", "https://blog.invalid/x/post.html"])
+
+        # git-init so we can prove zero writes — health-check never runs git or writes a file
+        git(vault, "init", "-q")
+        git(vault, "config", "user.email", "a@b.c")
+        git(vault, "config", "user.name", "a")
+        git(vault, "add", "-A")
+        git(vault, "commit", "-q", "-m", "seed")
+        head0 = git(vault, "rev-parse", "HEAD").stdout.strip()
+
+        common = ["--vault", vault, "--config-dir", cfgdir, "--sources", policy,
+                  "--today", "2026-06-21", "--timeout", "5"]
+        r = run_hc(common)
+        check("health-check exits 0", r.returncode == 0, r.stderr)
+        lines = by_entry(r.stdout)
+
+        check("clean entry produces no worklist line", "test-topic/clean" not in lines, lines.get("test-topic/clean"))
+        check("404 url flagged dead-link",
+              "[dead-link %s/missing]" % base in lines.get("test-topic/dead", ""), lines.get("test-topic/dead"))
+        check("connection-refused url flagged dead-link",
+              "[dead-link http://127.0.0.1:1/x]" in lines.get("test-topic/refused", ""), lines.get("test-topic/refused"))
+        check("HEAD-hostile (405 -> GET 200) NOT flagged dead (GET-retry)",
+              "test-topic/headhostile" not in lines, lines.get("test-topic/headhostile"))
+        ul = lines.get("test-topic/unverifiable", "")
+        check("persistent 403/429 (HEAD AND GET) flagged [unverifiable], NOT [dead-link]",
+              "[unverifiable %s/botblocked]" % base in ul and "[unverifiable %s/ratelimited]" % base in ul
+              and "[dead-link" not in ul, ul)
+        check("over-age entry flagged", "over-age" in lines.get("test-topic/old", ""), lines.get("test-topic/old"))
+        exp_over = (datetime.date(2026, 6, 21) - datetime.date(2026, 1, 1)).days - 30
+        check("over-age days computed (age - volatility)",
+              "[over-age %dd]" % exp_over in lines.get("test-topic/old", ""), lines.get("test-topic/old"))
+        check("sub-tier host flagged", "[sub-tier blog.invalid]" in lines.get("test-topic/subtier", ""), lines.get("test-topic/subtier"))
+        check("URL path filename NOT flagged as a sub-tier host",
+              "[sub-tier post.html]" not in lines.get("test-topic/subtier", ""), lines.get("test-topic/subtier"))
+
+        # the vault is read-only — no commit, clean tree (health-check writes nothing, calls no model)
+        check("vault HEAD unchanged (no commit)", git(vault, "rev-parse", "HEAD").stdout.strip() == head0)
+        check("vault tree clean (no file writes)", git(vault, "status", "--porcelain").stdout.strip() == "")
+
+        # --offline drops ONLY reachability; age + source-lint still fire
+        r2 = run_hc(common + ["--offline"])
+        off = by_entry(r2.stdout)
+        check("offline: no dead-link tags anywhere", "dead-link" not in r2.stdout, r2.stdout)
+        check("offline: no unverifiable tags either (also a reachability signal)", "unverifiable" not in r2.stdout, r2.stdout)
+        check("offline: a dead-only entry is no longer flagged", "test-topic/refused" not in off, off.get("test-topic/refused"))
+        check("offline: an unverifiable-only entry is no longer flagged", "test-topic/unverifiable" not in off, off.get("test-topic/unverifiable"))
+        check("offline: age still flagged", "over-age" in off.get("test-topic/old", ""), off.get("test-topic/old"))
+        check("offline: sub-tier still flagged", "[sub-tier blog.invalid]" in off.get("test-topic/subtier", ""), off.get("test-topic/subtier"))
+
+        # a malformed --today fails clean (warn + rc 2), never a raw traceback — matching the
+        # engine's "clean error, no Python traceback" discipline.
+        r3 = run_hc(["--vault", vault, "--config-dir", cfgdir, "--sources", policy, "--today", "garbage", "--offline"])
+        check("malformed --today: clean error, no traceback",
+              r3.returncode == 2 and "invalid --today" in r3.stderr and "Traceback" not in r3.stderr, r3.stderr)
+    finally:
+        srv.shutdown()
+        shutil.rmtree(root, ignore_errors=True)
+
+    passed = sum(1 for ok in _checks if ok)
+    total = len(_checks)
+    print("\n%s: %d/%d checks passed" % ("PASS" if passed == total else "FAIL", passed, total))
+    return 0 if passed == total else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

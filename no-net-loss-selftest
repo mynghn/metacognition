@@ -1,0 +1,143 @@
+#!/usr/bin/env python3
+"""no-net-loss-selftest — behavioral tests for the deterministic no-net-loss diff.
+
+Each test pins a property the verification envelope's no-net-loss floor must hold (run after any
+change to `no-net-loss` or the shared engine/sources.py it leans on):
+  - a dropped [[wikilink]], a dropped load-bearing number, and a dropped citation SOURCE (host) are
+    each reported, exit nonzero;
+  - a candidate that preserves all prior links/numbers/sources (even while ADDING content) is
+    clean, exit 0 — an addition is never a loss; an IDENTICAL candidate is clean;
+  - a number UPDATE surfaces the OLD value as dropped (a supersession to review, never a silent
+    loss) and fails until justified;
+  - a description change ALONE is advisory (reported, exit 0), but a description change
+    CO-OCCURRING with a real drop must STILL fail — the advisory never masks a drop;
+  - multiple drops are all reported and counted (the summary arithmetic is exercised, not assumed);
+  - shares engine/sources.py — proven via an ASYMMETRY: a candidate that REMOVES a bare year and a
+    whole URL reports NO dropped-number, which can only hold if year-exclusion + URL-strip fire
+    (a broken parser would surface the year/URL digits as dropped);
+  - a missing file is a clean error (exit 2, no traceback).
+"""
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+
+NNL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "no-net-loss")
+_checks = []
+
+
+def check(name, ok, detail=""):
+    _checks.append(bool(ok))
+    print("  %s %s%s" % ("PASS" if ok else "FAIL", name, ("  — " + str(detail)) if detail and not ok else ""))
+
+
+def write(path, desc, body, srcs=("https://example.com/p/2401",)):
+    src_lines = "\n".join('  - Author, "T", 2026 — ' + s for s in srcs)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("---\nname: alpha\ndescription: %s\nlast_refreshed: 2026-06-20\nsources:\n%s\n---\n\n%s\n"
+                 % (desc, src_lines, body))
+
+
+def run(prior, cand):
+    return subprocess.run([sys.executable, NNL, prior, cand], capture_output=True, text=True)
+
+
+def main():
+    root = tempfile.mkdtemp(prefix="nnl-selftest-")
+    try:
+        prior = os.path.join(root, "prior.md")
+        cand = os.path.join(root, "cand.md")
+        write(prior, "load when reasoning about X", "Alpha is 7% and costs $47,000.\n\nRelated: [[beta]], [[gamma]]")
+
+        # a dropped link AND a dropped number are each reported; exit nonzero
+        write(cand, "load when reasoning about X", "Alpha is 7%.\n\nRelated: [[beta]]")
+        r = run(prior, cand)
+        check("dropped link reported", "dropped-link: [[gamma]]" in r.stdout, r.stdout)
+        check("dropped number reported", "dropped-number: $47,000" in r.stdout, r.stdout)
+        check("exit nonzero when something dropped", r.returncode == 1, r.returncode)
+
+        # all preserved while ADDING content → clean, exit 0 (an addition is never a loss)
+        write(cand, "load when reasoning about X",
+              "Alpha is 7% and costs $47,000. Extra detail added here.\n\nRelated: [[beta]], [[gamma]]")
+        r = run(prior, cand)
+        check("clean candidate (additions only): no drops", r.stdout.strip() == "", r.stdout)
+        check("clean candidate: exit 0", r.returncode == 0, r.returncode)
+
+        # an IDENTICAL candidate is trivially clean
+        write(cand, "load when reasoning about X", "Alpha is 7% and costs $47,000.\n\nRelated: [[beta]], [[gamma]]")
+        r = run(prior, cand)
+        check("identical candidate: no drops, exit 0", r.stdout.strip() == "" and r.returncode == 0, "%d / %s" % (r.returncode, r.stdout))
+
+        # a number UPDATE surfaces the OLD value as dropped (supersession to review) and fails
+        write(cand, "load when reasoning about X", "Alpha is 42% and costs $47,000.\n\nRelated: [[beta]], [[gamma]]")
+        r = run(prior, cand)
+        check("number update surfaces the old value as dropped", "dropped-number: 7%" in r.stdout, r.stdout)
+        check("number update: exit nonzero (must be justified as supersession)", r.returncode == 1, r.returncode)
+
+        # a description change ALONE is advisory: reported, exit 0, no dropped-* lines
+        write(cand, "load when reasoning about X and also Y", "Alpha is 7% and costs $47,000.\n\nRelated: [[beta]], [[gamma]]")
+        r = run(prior, cand)
+        check("description change reported", "description-changed:" in r.stdout, r.stdout)
+        check("description change alone does NOT fail (exit 0)", r.returncode == 0, "%d / %s" % (r.returncode, r.stdout))
+        check("description change alone: no dropped-* lines", "dropped-" not in r.stdout, r.stdout)
+
+        # COMPOUND: a description change co-occurring with a real drop must STILL fail (advisory
+        # never masks a drop)
+        write(cand, "load when reasoning about X and also Y", "Alpha is 7% and costs $47,000.\n\nRelated: [[beta]]")
+        r = run(prior, cand)
+        check("compound: description-changed AND a drop both reported",
+              "description-changed:" in r.stdout and "dropped-link: [[gamma]]" in r.stdout, r.stdout)
+        check("compound: still exits nonzero (advisory does not mask the drop)", r.returncode == 1, r.returncode)
+
+        # MULTIPLE drops are all reported and counted (exercise the summary arithmetic)
+        write(prior, "load when reasoning about X",
+              "Alpha is 7% and 18% and costs $47,000.\n\nRelated: [[beta]], [[gamma]], [[delta]]")
+        write(cand, "load when reasoning about X", "Alpha is 7%.\n\nRelated: [[beta]]")
+        r = run(prior, cand)
+        check("multi-drop: both dropped numbers reported",
+              "dropped-number: 18%" in r.stdout and "dropped-number: $47,000" in r.stdout, r.stdout)
+        check("multi-drop: both dropped links reported",
+              "dropped-link: [[gamma]]" in r.stdout and "dropped-link: [[delta]]" in r.stdout, r.stdout)
+        check("multi-drop: summary counts 2 links + 2 numbers", "2 link(s), 2 number(s)" in r.stderr, r.stderr)
+        check("multi-drop: exit nonzero", r.returncode == 1, r.returncode)
+
+        # a dropped citation SOURCE (host) is a silent loss — flagged, exit nonzero
+        write(prior, "load when reasoning about X", "Alpha is corroborated.\n\nRelated: [[beta]]",
+              srcs=("https://example.com/p/2401", "https://arxiv.org/abs/2401.11111"))
+        write(cand, "load when reasoning about X", "Alpha is corroborated.\n\nRelated: [[beta]]",
+              srcs=("https://example.com/p/2401",))
+        r = run(prior, cand)
+        check("dropped source (host) reported", "dropped-source: arxiv.org" in r.stdout, r.stdout)
+        check("dropped source: exit nonzero", r.returncode == 1, r.returncode)
+        # keeping both sources (and adding body) → no dropped-source
+        write(cand, "load when reasoning about X", "Alpha is corroborated, with more detail.\n\nRelated: [[beta]]",
+              srcs=("https://example.com/p/2401", "https://arxiv.org/abs/2401.11111"))
+        r = run(prior, cand)
+        check("sources preserved: no dropped-source, exit 0",
+              "dropped-source" not in r.stdout and r.returncode == 0, "%d / %s" % (r.returncode, r.stdout))
+
+        # shared sources.py semantics, proven by ASYMMETRY: the candidate REMOVES a bare year and a
+        # whole URL; a correct parser excludes both so NO dropped-number is reported. A broken
+        # parser (no year-exclusion / no URL-strip) would surface 2019 / the URL digits as dropped.
+        write(prior, "load when reasoning about X",
+              "Founded in 2019; see https://example.com/abs/2401.12345 here.\n\nRelated: [[beta]]")
+        write(cand, "load when reasoning about X", "Founded recently; see the linked page here.\n\nRelated: [[beta]]")
+        r = run(prior, cand)
+        check("year + URL digits are not load-bearing numbers (asymmetric removal flags nothing)",
+              r.returncode == 0 and "dropped-number" not in r.stdout, "%d / %s" % (r.returncode, r.stdout))
+
+        # a missing file is a clean error (exit 2, no traceback)
+        r = run(prior, os.path.join(root, "does-not-exist.md"))
+        check("missing file: clean error exit 2, no traceback",
+              r.returncode == 2 and "file not found" in r.stderr and "Traceback" not in r.stderr, r.stderr)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+    passed = sum(1 for ok in _checks if ok)
+    total = len(_checks)
+    print("\n%s: %d/%d checks passed" % ("PASS" if passed == total else "FAIL", passed, total))
+    return 0 if passed == total else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

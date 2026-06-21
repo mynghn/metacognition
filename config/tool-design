@@ -2,3 +2,4 @@ stem = tool-design
 index_heading = Practices
 env_prefix = TD
 tier = situational
+volatility = 365

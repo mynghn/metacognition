@@ -32,6 +32,9 @@ import re
 import subprocess
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import sources  # engine-local module: the SOURCES.md authority-policy logic (shared with health-check)
+
 PROG = "kb-engine"
 
 
@@ -152,25 +155,57 @@ def _rollback(vault, rels):
                 pass
 
 
-def commit_change(vault, cfg, slug, verb):
+def parse_trailers(raw):
+    """Parse repeated `--trailer KEY:VALUE` strings into ordered (key, value) git-trailer
+    pairs (or None when unset). Split on the FIRST colon so a URL value keeps its own colons
+    (`Sources-after:https://…`). KEY must be a git-trailer token; a malformed key or a
+    multi-line value is rejected here, before any write — a bad provenance arg must fail loudly,
+    never silently degrade into ordinary commit-body text that `git log` won't parse back."""
+    if not raw:
+        return None
+    out = []
+    for item in raw:
+        if ":" not in item:
+            die("--trailer must be KEY:VALUE, got %r" % item)
+        k, v = item.split(":", 1)
+        k, v = k.strip(), v.strip()
+        if not re.match(r"^[A-Za-z][A-Za-z0-9-]*$", k):
+            die("--trailer key %r is not a valid git-trailer token (letters, digits, '-')" % k)
+        if "\n" in v:
+            die("--trailer value for %r must be single-line" % k)
+        out.append((k, v))
+    return out
+
+
+def commit_change(vault, cfg, slug, verb, provenance=None):
     """Stage the entry + INDEX and record exactly one commit in the vault repo's history,
     scoped to those two paths. The mutation and its commit are one engine step — a single
     controlled channel: on any git failure the working tree is rolled back to HEAD, so a half-written change can
-    never persist, and git errors surface as a clean message rather than a Python traceback."""
+    never persist, and git errors surface as a clean message rather than a Python traceback.
+
+    `provenance` — an ordered list of (key, value) git-trailer pairs, or None — appends
+    structured trailers after the subject (`git commit -m <subject> -m <trailers>`) so an
+    automated heal/evolution commit is self-describing and auditable straight from `git log`.
+    Change history lives in git, not frontmatter (which holds current state, not why a change
+    happened). None reproduces the bare `<stem>: <verb> <slug>` subject byte-for-byte, so a
+    human CLI write is unchanged. The engine stays generic about WHICH trailers it records —
+    the heal vocabulary (Heal-verdict, Heal-mode, Sources-before/after, …) is the caller's
+    schema, not the engine's, so the shared writer never learns one feature's words."""
     rels = [
         os.path.join(cfg["stem"], "knowledge", slug + ".md"),
         os.path.join(cfg["stem"], "INDEX.md"),
     ]
+    commit_cmd = ["git", "-C", vault, "commit", "-q", "-m", "%s: %s %s" % (cfg["stem"], verb, slug)]
+    if provenance:
+        commit_cmd += ["-m", "\n".join("%s: %s" % (k, v) for k, v in provenance)]
+    commit_cmd += ["--"] + rels
     try:
         subprocess.run(["git", "-C", vault, "add", "--"] + rels, check=True, capture_output=True, text=True)
         # Scope the change-check AND the commit to exactly these two paths (`-- rels`), so the
         # op's commit can never sweep in an unrelated already-staged change in the vault.
         if subprocess.run(["git", "-C", vault, "diff", "--cached", "--quiet", "--"] + rels).returncode == 0:
             die("nothing changed for %r — no commit made" % slug)
-        subprocess.run(
-            ["git", "-C", vault, "commit", "-q", "-m", "%s: %s %s" % (cfg["stem"], verb, slug), "--"] + rels,
-            check=True, capture_output=True, text=True,
-        )
+        subprocess.run(commit_cmd, check=True, capture_output=True, text=True)
     except FileNotFoundError:
         die("git not found on PATH — install git or fix PATH")
     except subprocess.CalledProcessError as exc:
@@ -195,9 +230,58 @@ def _frontmatter_fields(body):
     return fm, field
 
 
+def _unsafe_scalar(value):
+    """True if `value`, as authored, would NOT round-trip as a plain YAML string — the
+    colon-space / trailing-colon / unbalanced-leading-quote family that silently breaks
+    GitHub frontmatter rendering (a hard "mapping values are not allowed" parse error) or
+    mis-parses a `sources` item into a {key: value} mapping. Dependency-free by design: a
+    real YAML parser would be exact, but the engine is stdlib-only, so this targets the
+    observed failure family; the vault's CI runs full Psych as the comprehensive backstop."""
+    v = value.strip()
+    if not v:
+        return False
+    if v[0] in ("\"", "'"):
+        # Authored as a quoted scalar: trust it only if the same quote closes the line.
+        return not (len(v) >= 2 and v[-1] == v[0])
+    return (": " in v) or v.endswith(":") or (" #" in v)
+
+
+def _check_frontmatter_yaml(fm):
+    """Reject frontmatter whose scalar values won't parse as plain YAML strings, BEFORE the
+    engine writes the body verbatim. The regex field-reader above is lenient — it happily
+    accepts an unquoted `description`/`sources` value with a colon-space that GitHub then
+    fails to render (or silently mis-parses into a mapping). The fix is always the same:
+    wrap the value in double quotes."""
+    in_sources = False
+    for ln in fm.split("\n"):
+        top = re.match(r"^([A-Za-z_][\w-]*):[ \t]?(.*)$", ln)
+        if top and ln[:1] not in (" ", "\t"):
+            key, val = top.group(1), top.group(2).rstrip()
+            in_sources = key == "sources"
+            if val and _unsafe_scalar(val):
+                die("frontmatter %r is not valid YAML — a colon-space, trailing colon, or "
+                    "unbalanced quote makes the parser misread it; wrap the value in double "
+                    "quotes: %s" % (key, val))
+        elif in_sources:
+            seq = re.match(r"^[ \t]+-[ \t]+(.*)$", ln)
+            if seq:
+                item = seq.group(1).rstrip()
+                if _unsafe_scalar(item):
+                    die("frontmatter 'sources' item is not valid YAML — a colon-space or "
+                        "unbalanced quote silently mis-parses the citation into a mapping; "
+                        "wrap it in double quotes: %s" % item)
+            elif ln.strip():
+                in_sources = False
+
+
 def _validate_frontmatter(body, slug):
-    """Validate frontmatter and return the description. Pure check — writes nothing."""
+    """Validate frontmatter; return (description, degraded-reason-or-None). Pure check — writes
+    nothing. `degraded` is an optional quarantine marker: absent on a healthy entry, a non-empty
+    reason when a source fell below the authority bar. A degraded entry is PRESERVED and
+    down-ranked, never deleted — knowledge leaves the vault only by an explicit ratified remove,
+    never as a silent side effect of decay."""
     fm, field = _frontmatter_fields(body)
+    _check_frontmatter_yaml(fm)
     if field("name") != slug:
         die("frontmatter name %r != slug %r" % (field("name"), slug))
     desc = field("description")
@@ -207,7 +291,10 @@ def _validate_frontmatter(body, slug):
         die("frontmatter 'last_refreshed' missing")
     if not re.search(r"(?m)^sources:", fm):
         die("frontmatter 'sources' missing")
-    return desc
+    degraded = field("degraded")
+    if re.search(r"(?m)^degraded:", fm) and not degraded:
+        die("frontmatter 'degraded' present but empty — give a reason or omit the key")
+    return desc, degraded
 
 
 def _index_path(tdir):
@@ -225,11 +312,16 @@ def _index_heading_pos(lines, cfg):
     die("INDEX.md missing %r section" % heading)
 
 
-def _upsert_index(idx, lines, h, slug, desc):
+def _upsert_index(idx, lines, h, slug, desc, degraded=None):
     """Upsert the entry's INDEX line, keeping the section slug-sorted (ported verbatim
-    from the `*-kb` python block)."""
-    line = "- [%s](knowledge/%s.md) — %s" % (slug, slug, desc.strip("\"'"))
-    entry_re = re.compile(r"^- \[([a-z0-9-]+)\]\(knowledge/\1\.md\) — ")
+    from the `*-kb` python block). A degraded entry gets a leading `⚠ ` so the retrieval layer
+    down-ranks it while the entry itself is preserved (knowledge is never silently lost).
+    entry_re tolerates that optional marker so an existing ⚠ line is still parsed, re-sorted, and
+    preserved across a later upsert of another slug — without it, a degraded line that follows
+    the first entry would be silently dropped on the next write."""
+    mark = "⚠ " if degraded else ""
+    line = "- %s[%s](knowledge/%s.md) — %s" % (mark, slug, slug, desc.strip("\"'"))
+    entry_re = re.compile(r"^- (?:⚠ )?\[([a-z0-9-]+)\]\(knowledge/\1\.md\) — ")
     # Keep pre-entry lines (section comment/blanks); collect entry lines for re-sorting.
     # NOTE: any non-entry line AFTER the first entry is intentionally dropped — exact parity
     # with the legacy `*-kb` upsert (the section is heading + boilerplate + entry list, no tail).
@@ -249,7 +341,7 @@ def _upsert_index(idx, lines, h, slug, desc):
         fh.write("\n".join(out))
 
 
-def write_entry(verb, vault, cfg, slug):
+def write_entry(verb, vault, cfg, slug, provenance=None, sources_path=None):
     valid_slug(slug)
     _require_git_repo(vault)
     tdir = topic_dir(vault, cfg)
@@ -271,7 +363,28 @@ def write_entry(verb, vault, cfg, slug):
     # op never leaves an orphan entry or half-written INDEX. The `*-kb`
     # scripts wrote the entry before checking the heading; pre-validating closes that gap
     # with no change on valid input.
-    desc = _validate_frontmatter(body, slug)
+    desc, degraded = _validate_frontmatter(body, slug)
+    # Source-authority gate (part of the pre-write validation, so a rejected write is never
+    # written dirty): a missing policy fails LOUD — the writer never silently skips the bar —
+    # and an entry whose sole support is below the allowlist is refused, leaving any existing
+    # entry untouched. Citation RESOLVE + SUPPORT (network + judgment) is the skill's envelope,
+    # not this deterministic host check.
+    #
+    # EXCEPTION — quarantine: a write carrying a `degraded:` marker is admitted even when its sole
+    # support is below the bar. The marker is the explicit, recorded acknowledgement that the source
+    # is sub-par — the entry is down-ranked (⚠) for review, not passed off as authoritative — so it
+    # is the opposite of a silent "dirty" write. Without this, an entry whose
+    # only source decayed below the bar could be neither healed in place nor even marked degraded
+    # (the marking is itself a write the gate would block), so the knowledge could only be lost —
+    # the exact silent loss the quarantine marker exists to prevent. A NON-degraded sub-bar write is
+    # still refused; the marker is the one deliberate way past the bar.
+    patterns, found = sources.load_allowlist(sources_path)
+    if not found:
+        die("source policy not found or empty: %s — cannot enforce source authority "
+            "(pass --sources or restore SOURCES.md)" % sources_path)
+    violation = sources.authority_violation(body, patterns)
+    if violation and not degraded:
+        die("source authority: %s" % violation)
     idx = _index_path(tdir)
     lines = open(idx, encoding="utf-8").read().split("\n")
     h = _index_heading_pos(lines, cfg)
@@ -279,13 +392,13 @@ def write_entry(verb, vault, cfg, slug):
     os.makedirs(os.path.join(tdir, "knowledge"), exist_ok=True)
     with open(entry, "w", encoding="utf-8") as fh:
         fh.write(body)
-    _upsert_index(idx, lines, h, slug, desc)
-    sha = commit_change(vault, cfg, slug, verb)
+    _upsert_index(idx, lines, h, slug, desc, degraded)
+    sha = commit_change(vault, cfg, slug, verb, provenance)
     past = verb + ("d" if verb.endswith("e") else "ed")  # capture->captured, refresh->refreshed
     sys.stdout.write("%s: %s %s (%s)\n" % (PROG, past, slug, sha))
 
 
-def remove_entry(vault, cfg, slug):
+def remove_entry(vault, cfg, slug, provenance=None):
     valid_slug(slug)
     _require_git_repo(vault)
     tdir = topic_dir(vault, cfg)
@@ -293,12 +406,15 @@ def remove_entry(vault, cfg, slug):
     if not os.path.exists(entry):
         die("entry %r not found" % slug)
     idx = _index_path(tdir)
-    pat = re.compile(r"^- \[%s\]\(knowledge/%s\.md\) — " % (re.escape(slug), re.escape(slug)))
+    # Tolerate the optional `⚠ ` down-rank marker so removing a degraded entry drops its INDEX
+    # line too (no orphan). Engine `remove` is explicit/ratified — only AUTOMATIC removal of a
+    # degraded entry is disallowed, and that is a skill-level rule, not an engine refusal.
+    pat = re.compile(r"^- (?:⚠ )?\[%s\]\(knowledge/%s\.md\) — " % (re.escape(slug), re.escape(slug)))
     lines = open(idx, encoding="utf-8").read().split("\n")
     os.remove(entry)
     with open(idx, "w", encoding="utf-8") as fh:
         fh.write("\n".join(l for l in lines if not pat.match(l)))
-    sha = commit_change(vault, cfg, slug, "remove")
+    sha = commit_change(vault, cfg, slug, "remove", provenance)
     sys.stdout.write("%s: removed %s (%s)\n" % (PROG, slug, sha))
 
 
@@ -318,11 +434,17 @@ def main(argv=None):
     p.add_argument("--vault", help="vault repo root (default: resolved by precedence — "
                                    "$<PREFIX>_KB_VAULT / $KB_VAULT / installer config / %s)" % DEFAULT_VAULT)
     sub = p.add_subparsers(dest="op", required=True)
+    trailer_help = ("structured git-trailer provenance (repeatable), e.g. "
+                    "--trailer Heal-mode:auto — appended to the commit for audit")
+    sources_help = "source-authority policy file (default: SOURCES.md at the engine repo root)"
     for op in ("capture", "refresh"):
         s = sub.add_parser(op, help="%s an entry (markdown on stdin)" % op)
         s.add_argument("slug")
+        s.add_argument("--trailer", action="append", metavar="KEY:VALUE", help=trailer_help)
+        s.add_argument("--sources", metavar="FILE", help=sources_help)
     s = sub.add_parser("remove", help="remove an entry")
     s.add_argument("slug")
+    s.add_argument("--trailer", action="append", metavar="KEY:VALUE", help=trailer_help)
     s = sub.add_parser("locate", help="print the resolved topic/index/entry paths")
     s.add_argument("slug", nargs="?")
     args = p.parse_args(argv)
@@ -330,9 +452,10 @@ def main(argv=None):
     cfg = load_config(args.config)
     vault = resolve_vault(args.vault, cfg)
     if args.op in ("capture", "refresh"):
-        write_entry(args.op, vault, cfg, args.slug)
+        write_entry(args.op, vault, cfg, args.slug, parse_trailers(args.trailer),
+                    sources.resolve_sources(args.sources))
     elif args.op == "remove":
-        remove_entry(vault, cfg, args.slug)
+        remove_entry(vault, cfg, args.slug, parse_trailers(args.trailer))
     elif args.op == "locate":
         locate(vault, cfg, args.slug)
 

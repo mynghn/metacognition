@@ -9,12 +9,25 @@ Parity (vs the legacy `*-kb` scripts):
   - INDEX stays slug-sorted across out-of-order captures;
   - capture refuses an existing slug; refresh refuses an absent one; refresh overwrites;
   - every frontmatter rule rejects AND writes nothing (atomicity);
+  - the source-authority gate rejects a write whose sole support is below the SOURCES.md
+    allowlist (>=1 allowlisted source admits), fails loud on a missing OR empty policy, judges a
+    scheme-less / bare-domain citation like its schemed form (no bypass) and resolves a URL's
+    real host past spoofed userinfo, and the policy module parses hosts / matches *. patterns /
+    flags an uncorroborated load-bearing number without leaking URL-path digits;
   - a missing INDEX heading rejects with no orphan entry; invalid slug rejects;
+  - a `degraded: <reason>` entry validates, is PRESERVED (marks, never deletes), and gets a
+    ⚠ down-rank prefix on its INDEX line that survives later upserts; an empty reason rejects;
+    explicit remove still drops a degraded entry's line cleanly (no orphan); a sub-allowlist
+    sole-support write carrying the marker is ADMITTED (quarantine), where the same write without
+    it is refused;
   - CRLF input is accepted and normalized (legacy file-round-trip parity);
   - remove drops the entry file and its INDEX line.
 
 Mutation (-> the vault repo):
   - every capture / refresh / remove records EXACTLY ONE commit in the vault repo;
+  - provenance trailers round-trip out of `git log` while the subject stays the bare
+    `<stem>: <verb> <slug>` form; a no-provenance write is byte-identical to today's commit;
+    malformed `--trailer` is rejected before any write;
   - a rejected op records NO commit and leaves the tree unchanged;
   - the vault location resolves from $<PREFIX>_KB_VAULT / $KB_VAULT / default when --vault is omitted;
   - a non-git vault is refused.
@@ -49,6 +62,18 @@ Read this index first, then load only matching entries.
 
 <!-- one line per concept; appended by capture/refresh -->
 """
+
+# A permissive source policy for the parity/mutation tests, injected via $KB_SOURCES so every
+# existing capture/refresh clears the write-gate on VALID_ENTRY's example.com source. The gate's
+# own reject/admit behavior is exercised separately with explicit, restrictive --sources policies.
+SOURCES_PERMISSIVE = (
+    "# test policy\n"
+    "```hosts\n"
+    "example.com\n"
+    "arxiv.org\n"
+    "*.anthropic.com\n"
+    "```\n"
+)
 
 _checks = []
 
@@ -97,10 +122,18 @@ def index_lines(tdir):
 
 
 def entry_slugs(tdir):
-    return [l.split("[", 1)[1].split("]", 1)[0] for l in index_lines(tdir) if l.startswith("- [")]
+    # Match an entry line with OR without the `⚠ ` degraded prefix, so a degraded entry is
+    # still counted (it is listed, just down-ranked).
+    return [l.split("[", 1)[1].split("]", 1)[0]
+            for l in index_lines(tdir) if l.startswith("- ") and "](knowledge/" in l]
 
 
 def main():
+    pol_dir = tempfile.mkdtemp(prefix="kb-sources-")
+    permissive = os.path.join(pol_dir, "SOURCES.md")
+    with open(permissive, "w", encoding="utf-8") as fh:
+        fh.write(SOURCES_PERMISSIVE)
+    os.environ["KB_SOURCES"] = permissive
     vault, tdir, cfg = make_vault()
     try:
         base = ncommits(vault)
@@ -152,6 +185,13 @@ def main():
             "missing-sources": "\n".join(
                 l for l in VALID_ENTRY.format(slug="no-src").split("\n")
                 if not l.startswith("sources:") and not l.strip().startswith("- Author")) + "\n",
+            # colon-space in an unquoted scalar -> would break GitHub frontmatter rendering
+            "colon-desc": VALID_ENTRY.format(slug="colon-desc").replace(
+                "description: one-line retrieval trigger for colon-desc",
+                "description: load when: a colon-space breaks yaml"),
+            # colon-space in an unquoted sources item -> silently mis-parses into a mapping
+            "colon-src": VALID_ENTRY.format(slug="colon-src").replace(
+                'Author, "Title", 2026', "ReAct: Synergizing Reasoning and Acting"),
         }
         for slug, body in bad.items():
             r = run(cfg, vault, ["capture", slug], body)
@@ -159,6 +199,18 @@ def main():
             check("reject bad frontmatter: %s" % slug, r.returncode != 0 and not wrote,
                   "rc=%s wrote=%s" % (r.returncode, wrote))
         check("rejected captures made no commits", ncommits(vault) == n)
+
+        # the YAML gate must NOT over-reject: a colon-space that is properly double-quoted
+        # is valid YAML and must be admitted (description AND a sources item).
+        quoted_ok = VALID_ENTRY.format(slug="quoted-colon").replace(
+            "description: one-line retrieval trigger for quoted-colon",
+            'description: "load when: a quoted colon is fine"').replace(
+            'Author, "Title", 2026 — https://example.com',
+            '"ReAct: Synergizing — https://example.com"')
+        r = run(cfg, vault, ["capture", "quoted-colon"], quoted_ok)
+        wrote = os.path.isfile(os.path.join(tdir, "knowledge", "quoted-colon.md"))
+        check("accept properly-quoted colon-space frontmatter", r.returncode == 0 and wrote,
+              "rc=%s wrote=%s err=%s" % (r.returncode, wrote, r.stderr))
 
         # invalid slug rejects
         r = run(cfg, vault, ["capture", "Bad_Slug"], VALID_ENTRY.format(slug="Bad_Slug"))
@@ -180,6 +232,205 @@ def main():
         check("remove records one commit", ncommits(vault) == n + 1)
         r = run(cfg, vault, ["remove", "ghost"])
         check("remove refuses absent slug", r.returncode != 0)
+
+        # provenance trailers: an automated heal/evolution commit is self-describing — its
+        # structured trailers round-trip out of `git log`, while the subject stays the bare
+        # `<stem>: <verb> <slug>` form (provenance lives in git history, not in the subject).
+        n = ncommits(vault)
+        r = run(cfg, vault, ["capture", "healed",
+                             "--trailer", "Heal-verdict:stale",
+                             "--trailer", "Heal-mode:auto",
+                             "--trailer", "Heal-confidence:0.9",
+                             "--trailer", "Sources-before:https://old.example.com",
+                             "--trailer", "Sources-after:https://arxiv.org/abs/1, https://arxiv.org/abs/2",
+                             "--trailer", "Heal-run:run-42"],
+                VALID_ENTRY.format(slug="healed"))
+        check("capture with provenance exits 0", r.returncode == 0, r.stderr)
+        check("provenance records exactly one commit", ncommits(vault) == n + 1)
+
+        def trailer(key):
+            return git(vault, "log", "-1", "--format=%%(trailers:key=%s,valueonly)" % key).stdout.strip()
+        check("provenance: Heal-verdict recoverable from git log", trailer("Heal-verdict") == "stale", trailer("Heal-verdict"))
+        check("provenance: Heal-mode recoverable", trailer("Heal-mode") == "auto", trailer("Heal-mode"))
+        check("provenance: Heal-confidence recoverable", trailer("Heal-confidence") == "0.9", trailer("Heal-confidence"))
+        check("provenance: Sources-after preserves comma-joined urls",
+              trailer("Sources-after") == "https://arxiv.org/abs/1, https://arxiv.org/abs/2", trailer("Sources-after"))
+        check("provenance: subject stays the bare stem/verb/slug form",
+              git(vault, "log", "-1", "--format=%s").stdout.strip() == "test-topic: capture healed")
+
+        # a remove (= retire) carries provenance through the same path
+        run(cfg, vault, ["remove", "healed", "--trailer", "Heal-verdict:retire", "--trailer", "Heal-mode:ratified"])
+        check("retire (remove) carries provenance", trailer("Heal-verdict") == "retire", trailer("Heal-verdict"))
+
+        # back-compat: a no-provenance write is BYTE-IDENTICAL to today's commit message
+        # (bare subject, empty body — no trailers paragraph), so adding provenance support never
+        # silently rewrites the existing human-CLI commit shape.
+        run(cfg, vault, ["capture", "plain"], VALID_ENTRY.format(slug="plain"))
+        check("no-provenance: subject unchanged",
+              git(vault, "log", "-1", "--format=%s").stdout.strip() == "test-topic: capture plain")
+        check("no-provenance: empty body (no trailers paragraph appended)",
+              git(vault, "log", "-1", "--format=%b").stdout.strip() == "")
+        check("no-provenance: git parses zero trailers",
+              git(vault, "log", "-1", "--format=%(trailers)").stdout.strip() == "")
+
+        # malformed provenance is rejected before any write — a bad --trailer must fail loudly,
+        # never silently degrade into non-trailer commit-body text.
+        n = ncommits(vault)
+        r = run(cfg, vault, ["capture", "badtrail", "--trailer", "no-colon-here"], VALID_ENTRY.format(slug="badtrail"))
+        check("malformed --trailer (no colon) rejected", r.returncode != 0 and "KEY:VALUE" in r.stderr, r.stderr)
+        r = run(cfg, vault, ["capture", "badkey", "--trailer", "Bad Key:value"], VALID_ENTRY.format(slug="badkey"))
+        check("--trailer with non-token key rejected", r.returncode != 0 and "trailer token" in r.stderr, r.stderr)
+        check("rejected provenance wrote no entry + no commit",
+              not os.path.isfile(os.path.join(tdir, "knowledge", "badtrail.md")) and ncommits(vault) == n)
+
+        # source-authority gate: a write whose sole support is below the allowlist is rejected
+        # (never written dirty); >=1 allowlisted source admits. Authority (host vs allowlist) is
+        # the engine's deterministic half — citation resolve/support is the skill's envelope.
+        strict = os.path.join(pol_dir, "strict.md")
+        with open(strict, "w", encoding="utf-8") as fh:
+            fh.write("# strict\n```hosts\narxiv.org\n*.anthropic.com\n```\n")
+        n = ncommits(vault)
+        weak = VALID_ENTRY.format(slug="weak").replace("https://example.com", "https://random-blog.example.net")
+        r = run(cfg, vault, ["capture", "weak", "--sources", strict], weak)
+        check("sub-allowlist sole source rejected", r.returncode != 0 and "source authority" in r.stderr, r.stderr)
+        check("gate-rejected write: no entry, no commit",
+              not os.path.isfile(os.path.join(tdir, "knowledge", "weak.md")) and ncommits(vault) == n)
+        strong = VALID_ENTRY.format(slug="strong").replace("https://example.com", "https://arxiv.org/abs/2401.00001")
+        r = run(cfg, vault, ["capture", "strong", "--sources", strict], strong)
+        check("allowlisted source admitted", r.returncode == 0, r.stderr)
+        mixed = VALID_ENTRY.format(slug="mixed").replace(
+            "https://example.com\n",
+            "https://random-blog.example.net\n  - Paper — https://arxiv.org/abs/2401.00002\n")
+        r = run(cfg, vault, ["capture", "mixed", "--sources", strict], mixed)
+        check("mixed sources admitted when >=1 clears the bar", r.returncode == 0, r.stderr)
+
+        # quarantine exemption: the SAME kind of sub-allowlist sole-support write that `weak`
+        # rejected above is ADMITTED when it carries a `degraded:` marker — the marker turns a
+        # rejected "dirty" write into a down-ranked, review-flagged one, so an entry whose only
+        # source decayed below the bar can be preserved (marked) rather than lost. The marker is the
+        # one deliberate way past the bar; without it (cf. `weak`) the write is still refused.
+        quarantined = VALID_ENTRY.format(slug="quarantined").replace(
+            "https://example.com", "https://random-blog.example.net").replace(
+            "last_refreshed: 2026-06-20",
+            "last_refreshed: 2026-06-20\ndegraded: sole source fell below the bar; no replacement found")
+        r = run(cfg, vault, ["capture", "quarantined", "--sources", strict], quarantined)
+        check("sub-allowlist sole source ADMITTED when marked degraded (quarantine)", r.returncode == 0, r.stderr)
+        idx_txt = "\n".join(index_lines(tdir))
+        check("quarantined entry written + down-ranked (⚠ in INDEX)",
+              os.path.isfile(os.path.join(tdir, "knowledge", "quarantined.md")) and "⚠ [quarantined]" in idx_txt,
+              idx_txt[:200])
+
+        # a missing / empty policy fails LOUD — the writer never silently skips the authority bar
+        r = run(cfg, vault, ["capture", "nopol", "--sources", os.path.join(pol_dir, "absent.md")],
+                VALID_ENTRY.format(slug="nopol"))
+        check("missing source policy fails loud (no silent skip)",
+              r.returncode != 0 and "source policy not found" in r.stderr, r.stderr)
+
+        # SOURCES.md policy module (unit): the parser the write-gate AND the health-check
+        # source-lint both consume — one parser, so their bars can never drift.
+        sys.path.insert(0, os.path.dirname(ENGINE))
+        import sources as S
+        pats, found = S.load_allowlist(strict)
+        check("hosts block parses", found and "arxiv.org" in pats and "*.anthropic.com" in pats, str(pats))
+        check("apex host matches bare pattern", S.host_allowed("arxiv.org", pats))
+        check("subdomain matches *. pattern", S.host_allowed("docs.anthropic.com", pats))
+        check("apex matches *. pattern", S.host_allowed("anthropic.com", pats))
+        check("non-allowlisted host rejected", not S.host_allowed("evil.example.net", pats))
+        check("absent policy reports found=False (caller fails loud, not empty-allows)",
+              S.load_allowlist(os.path.join(pol_dir, "absent.md"))[1] is False)
+        num_body = ("---\nname: x\ndescription: d\nlast_refreshed: 2026-01-01\n"
+                    "sources:\n  - One — https://arxiv.org/abs/1\n---\n\n"
+                    "A benchmark of 194,480 calls hit 90% accuracy in 2025.\n")
+        check("corroboration flags a load-bearing number on a single source",
+              "194,480" in S.corroboration_flag(num_body), str(S.corroboration_flag(num_body)))
+        two_src = num_body.replace("sources:\n  - One — https://arxiv.org/abs/1\n",
+                                   "sources:\n  - One — https://arxiv.org/abs/1\n  - Two — https://www.anthropic.com/x\n")
+        check("corroboration clears with a 2nd distinct source", S.corroboration_flag(two_src) == [])
+        check("a bare year is not a load-bearing number", "2025" not in S.load_bearing_numbers(num_body))
+
+        # --- gate hardening (adversarial-verification fixes) ---
+        # a scheme-less / non-http citation is judged like its schemed form: a healer renders
+        # "Author, sitename.com, 2026" with no scheme, and that must NOT bypass the authority bar.
+        schemeless = VALID_ENTRY.format(slug="schemeless").replace("https://example.com", "medium.com/@a/post")
+        r = run(cfg, vault, ["capture", "schemeless", "--sources", strict], schemeless)
+        check("scheme-less sub-tier sole source rejected (no bypass)",
+              r.returncode != 0 and "source authority" in r.stderr, r.stderr)
+        bare_ok = VALID_ENTRY.format(slug="bareok").replace("https://example.com", "arxiv.org/abs/1706.03762")
+        r = run(cfg, vault, ["capture", "bareok", "--sources", strict], bare_ok)
+        check("bare allowlisted host (no scheme) admitted", r.returncode == 0, r.stderr)
+        # userinfo can't smuggle an allowlisted host in front of the real (sub-tier) one
+        check("userinfo spoof resolves to the REAL host",
+              S.source_hosts("---\nname: x\ndescription: d\nlast_refreshed: 2026-01-01\n"
+                             "sources:\n  - x https://arxiv.org@evil.com/p\n---\n\nB.\n") == ["evil.com"])
+        # a host-less citation contributes nothing — a legit book citation is not falsely rejected
+        check("host-less citation yields no host",
+              S.source_hosts("---\nname: x\ndescription: d\nlast_refreshed: 2026-01-01\n"
+                             "sources:\n  - Goodfellow et al., Deep Learning, MIT Press, 2016\n---\n\nB.\n") == [])
+        # a URL PATH filename is not a host: the whole /path is consumed, so `…/guide.pdf` never
+        # surfaces as a phantom `guide.pdf` host (which would be a false [sub-tier] lint flag)
+        check("URL path filename is not read as a host",
+              S.source_hosts("---\nname: x\ndescription: d\nlast_refreshed: 2026-01-01\n"
+                             "sources:\n  - G https://www.anthropic.com/x/a-practical-guide.pdf\n---\n\nB.\n")
+              == ["www.anthropic.com"])
+        # an empty / comment-only hosts fence fails LOUD (reported not-found), not a silent reject-all
+        empty_pol = os.path.join(pol_dir, "empty.md")
+        with open(empty_pol, "w", encoding="utf-8") as fh:
+            fh.write("# policy\n```hosts\n# arxiv.org\n```\n")
+        check("empty/comment-only hosts fence reported not-found", S.load_allowlist(empty_pol)[1] is False)
+        r = run(cfg, vault, ["capture", "emptypol", "--sources", empty_pol], VALID_ENTRY.format(slug="emptypol"))
+        check("empty hosts fence fails loud at the gate",
+              r.returncode != 0 and "source policy not found or empty" in r.stderr, r.stderr)
+        # advisory hygiene: a digit in a URL PATH is not a numeric claim; a decimal % is one token
+        leak_body = ("---\nname: x\ndescription: d\nlast_refreshed: 2026-01-01\nsources:\n"
+                     "  - One — https://arxiv.org/abs/1\n---\n\nClean, no claim. See https://arxiv.org/abs/2401.12345 .\n")
+        check("no digit leak from a URL path", S.load_bearing_numbers(leak_body) == [], str(S.load_bearing_numbers(leak_body)))
+        dup_body = ("---\nname: x\ndescription: d\nlast_refreshed: 2026-01-01\nsources:\n"
+                    "  - One — https://arxiv.org/abs/1\n---\n\nReached 90.2% accuracy.\n")
+        check("decimal percentage emits one token (no bare-decimal dup)",
+              S.load_bearing_numbers(dup_body) == ["90.2%"], str(S.load_bearing_numbers(dup_body)))
+
+        # degraded marker (quarantine): an entry marked `degraded: <reason>` validates, is
+        # PRESERVED (marks, never deletes), and its INDEX line carries a ⚠ down-rank prefix.
+        run(cfg, vault, ["capture", "decaying"], VALID_ENTRY.format(slug="decaying"))
+        check("healthy entry: no ⚠ in INDEX",
+              not any(l.startswith("- ⚠") and "decaying" in l for l in index_lines(tdir)))
+        degraded_body = VALID_ENTRY.format(slug="decaying").replace(
+            "last_refreshed: 2026-06-20", "last_refreshed: 2026-06-20\ndegraded: sole source went 404")
+        r = run(cfg, vault, ["refresh", "decaying"], degraded_body)
+        check("degraded entry validates + refreshes", r.returncode == 0, r.stderr)
+        check("degraded entry is PRESERVED (marks, not deletes)",
+              os.path.isfile(os.path.join(tdir, "knowledge", "decaying.md")))
+        deg_line = [l for l in index_lines(tdir) if "decaying" in l]
+        check("degraded INDEX line carries ⚠ down-rank prefix",
+              len(deg_line) == 1 and deg_line[0].startswith("- ⚠ ["), str(deg_line))
+        check("degraded entry still counted among entries", "decaying" in entry_slugs(tdir))
+
+        # a ⚠ line SURVIVES a later upsert of another slug (entry_re tolerates the marker —
+        # without that the degraded line would be dropped on the next write)
+        run(cfg, vault, ["capture", "zzz-after"], VALID_ENTRY.format(slug="zzz-after"))
+        deg_line2 = [l for l in index_lines(tdir) if "decaying" in l]
+        check("⚠ line survives a later unrelated upsert",
+              len(deg_line2) == 1 and deg_line2[0].startswith("- ⚠ ["), str(deg_line2))
+
+        # healing back (refresh with no degraded marker) clears the ⚠
+        run(cfg, vault, ["refresh", "decaying"], VALID_ENTRY.format(slug="decaying"))
+        healed = [l for l in index_lines(tdir) if "decaying" in l]
+        check("healed refresh clears the ⚠ marker", healed and not healed[0].startswith("- ⚠"), str(healed))
+
+        # an empty `degraded:` is rejected — a quarantine marker must carry a reason
+        empty_deg = VALID_ENTRY.format(slug="decaying").replace(
+            "last_refreshed: 2026-06-20", "last_refreshed: 2026-06-20\ndegraded:")
+        r = run(cfg, vault, ["refresh", "decaying"], empty_deg)
+        check("empty degraded reason rejected", r.returncode != 0 and "degraded" in r.stderr, r.stderr)
+
+        # explicit remove of a degraded entry drops its ⚠ INDEX line cleanly (no orphan). The
+        # engine's explicit remove still works; only AUTOMATIC removal on decay is disallowed
+        # (a skill-level rule, realized by the maintenance workflow, not an engine refusal).
+        run(cfg, vault, ["refresh", "decaying"], degraded_body)
+        r = run(cfg, vault, ["remove", "decaying"])
+        check("explicit remove of degraded entry exits 0", r.returncode == 0, r.stderr)
+        check("removed degraded entry: no orphan ⚠ INDEX line",
+              not any("decaying" in l for l in index_lines(tdir)))
 
         # locate resolves paths (incl. the vault)
         r = run(cfg, vault, ["locate", "alpha"])
@@ -304,6 +555,7 @@ def main():
             shutil.rmtree(v3, ignore_errors=True)
     finally:
         shutil.rmtree(vault, ignore_errors=True)
+        shutil.rmtree(pol_dir, ignore_errors=True)
 
     passed = sum(1 for _, ok, _ in _checks if ok)
     total = len(_checks)

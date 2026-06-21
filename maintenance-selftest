@@ -1,0 +1,472 @@
+#!/usr/bin/env python3
+"""maintenance-selftest — behavioral tests for the propose->ratify spine the
+metacognition-maintenance skill drives (W1 of 0010-vault-self-evolution).
+
+The skill itself is prose an agent follows; this file is the executable contract for the
+deterministic git + kb-engine mechanics that prose relies on, so the spine's WHYs live here
+(run after any change to the spine reference or the skill's applier procedure). It drives the
+REAL kb-engine against a throwaway vault — no mock — so a drift between the documented protocol
+and the engine's actual behavior fails a check here rather than in production.
+
+Each test pins one load-bearing property of the spine:
+  - PROPOSAL ISOLATION: a claim-affecting / structural change is proposed on a `proposal/...`
+    worktree+branch off main, so main's HEAD and tree are untouched until the human merges. Reject
+    (worktree remove + branch -D) leaves the vault byte-for-byte unchanged — no main trace, branch
+    gone, working tree clean (incl. untracked). (A single claim-change MAY instead ratify via the
+    lighter present-diff-then-`refresh`-on-main path — also human-gated; that prose path lives in
+    propose-on-branch.md and is not exercised here.)
+  - RATIFY = MERGE: merging the proposal branch applies EVERY verb commit to main — pinned on a
+    multi-commit composite (both the refresh and the capture land; INDEX holds both slugs).
+  - PROVENANCE + INDIVIDUALLY REVERTIBLE: each proposal commit carries the skill's Heal-* git
+    trailers and keeps the engine's bare `<stem>: <verb> <slug>` subject; reverting ONE composite
+    commit does not force reverting its sibling, though both touched the shared INDEX.
+  - RESTARTABLE COMPOSITE: a multi-verb op — split (refresh+capture) AND merge (refresh+remove) —
+    is an ordered sequence; progress is the set of verb-commits already on the branch (`git log
+    main..branch`), NOT a side file. An interrupted op re-runs only the missing verbs, and a full
+    re-run is a no-op — idempotent, because the engine errors on a blind retry (refresh of
+    unchanged content, capture of an existing slug, remove of an ABSENT slug) and the applier
+    skips by branch-log instead.
+  - SINGLE WRITER: every change is one kb-engine commit; the tree is clean after each op
+    (no out-of-band hand-edit) and every commit subject is engine-shaped.
+  - AUTO PATH: a claim-preserving heal commits straight to main with `Heal-mode: auto` and no
+    worktree. This pins the mechanical WRITE path only — the gate's CLASSIFICATION (which change
+    is auto vs proposal) is skill judgment/prose, not engine code, so it is out of this harness.
+  - QUARANTINE WRITE (T1, W3): a sub-bar source WITHOUT a degraded marker is refused (never written
+    dirty); the SAME entry carrying a `degraded:` marker is admitted, lands one commit on main with
+    the `⚠` INDEX down-rank and `Heal-verdict: degraded` provenance. Pins the degraded write through
+    the skill's refresh+provenance route end-to-end (the engine's degraded-admit + ⚠ unit lives in
+    engine/selftest); the route CHOICE (quarantine → proposal) is skill prose, out of this harness.
+  - CROSS-STEM COMPOSITE (T3, W5): a family op's vault side can span TWO siblings on one proposal
+    branch — a boundary move is `remove A/<slug>` + `capture B/<slug>` under two different --config.
+    Pins that the restartable applier skips by the FULL stem-qualified subject `<stem>: <verb> <slug>`
+    (so two stems can't collide on a shared `<verb> <slug>`), resumes only the missing verb across
+    stems, re-runs to a no-op, and that ratify-merge lands BOTH stems' changes. The FAMILY.md/config
+    registry side of a T3 op is plain git (a file edit reviewed as a diff) — nothing engine-specific,
+    so it is skill prose (family-evolution.md), out of this harness.
+"""
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+
+ENGINE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "engine", "kb-engine")
+
+_checks = []
+
+
+def check(name, ok, detail=""):
+    _checks.append(bool(ok))
+    print("  %s %s%s" % ("PASS" if ok else "FAIL", name, ("  — " + str(detail)) if detail and not ok else ""))
+
+
+def git(v, *a):
+    return subprocess.run(["git", "-C", v, *a], capture_output=True, text=True)
+
+
+def head(v, ref="HEAD"):
+    return git(v, "rev-parse", ref).stdout.strip()
+
+
+def tree_hash(v, ref="HEAD"):
+    # The commit's tree object — identical tree hash == byte-for-byte identical content (reject path).
+    return git(v, "rev-parse", ref + "^{tree}").stdout.strip()
+
+
+INDEX_SKELETON = (
+    "# Test KB — Index\n\nRead this index first, then load only matching entries.\n\n"
+    "## Concepts\n\n<!-- one line per concept; appended by capture/refresh -->\n"
+)
+SOURCES = "# test policy\n```hosts\nexample.com\narxiv.org\n```\n"
+
+
+def entry(slug, body):
+    return ('---\nname: %s\ndescription: trigger for %s\nlast_refreshed: 2026-06-20\n'
+            'sources:\n  - Author, "Title", 2026 — https://example.com\n---\n\n%s\n'
+            % (slug, slug, body))
+
+
+def make_vault(root):
+    """A throwaway single-topic vault, git-initialised with one seeded entry on main — the
+    starting state every spine test branches a proposal from. Mirrors engine/selftest's harness."""
+    vault = os.path.join(root, "vault")
+    kdir = os.path.join(vault, "test-topic", "knowledge")
+    os.makedirs(kdir)
+    with open(os.path.join(vault, "test-topic", "INDEX.md"), "w", encoding="utf-8") as fh:
+        fh.write(INDEX_SKELETON)
+    cfg = os.path.join(root, "config")
+    with open(cfg, "w", encoding="utf-8") as fh:
+        fh.write("stem = test-topic\nindex_heading = Concepts\nenv_prefix = CE\ntier = common\n")
+    sources = os.path.join(root, "SOURCES.md")
+    with open(sources, "w", encoding="utf-8") as fh:
+        fh.write(SOURCES)
+    git(vault, "init", "-q")
+    git(vault, "config", "user.name", "selftest")
+    git(vault, "config", "user.email", "selftest@example.com")
+    # seed an entry on main via the engine, so 'refresh' has a target to supersede
+    run(cfg, vault, sources, ["capture", "alpha"], entry("alpha", "Original body of alpha."))
+    return vault, cfg, sources
+
+
+def add_topic(root, vault, stem):
+    """Seed a SECOND sibling (its topic folder + INDEX + its own config) in the same vault, so a T3
+    cross-stem composite has two stems to move a concept between. The empty INDEX is committed by the
+    sibling's first engine capture (same as make_vault's first capture commits test-topic's INDEX)."""
+    kdir = os.path.join(vault, stem, "knowledge")
+    os.makedirs(kdir)
+    with open(os.path.join(vault, stem, "INDEX.md"), "w", encoding="utf-8") as fh:
+        fh.write(INDEX_SKELETON)
+    cfg = os.path.join(root, "config-" + stem)
+    with open(cfg, "w", encoding="utf-8") as fh:
+        fh.write("stem = %s\nindex_heading = Concepts\nenv_prefix = OT\ntier = situational\n" % stem)
+    return cfg
+
+
+def run(cfg, vault, sources, args, stdin=None):
+    """Invoke the engine exactly as the skill does — --config, --vault (main OR a worktree),
+    --sources. Returns the CompletedProcess."""
+    cmd = [sys.executable, ENGINE, "--config", cfg, "--vault", vault, *args]
+    if sources and args and args[0] in ("capture", "refresh"):
+        cmd += ["--sources", sources]
+    return subprocess.run(cmd, input=stdin, capture_output=True, text=True)
+
+
+# --- The spine's restartable composite-op applier, encoded as the skill documents it. ---
+# An op is (verb, slug, content_or_None, trailers). Progress is read from the branch's own commit
+# log (main..branch) — the proposal branch IS the op-progress record, so an
+# interrupted sequence re-runs only the verbs not yet committed, and a completed sequence re-runs
+# to a no-op. This is what makes a blind engine retry (which would error) unnecessary.
+def applied_subjects(vault, base, branch):
+    """The full engine-shaped subjects (`<stem>: <verb> <slug>`) already committed on the branch — the
+    op-progress record the restartable applier skips by. Stem-qualified (not bare `<verb> <slug>`) so
+    it stays correct for a T3 cross-stem composite, where two stems could share a `<verb> <slug>`."""
+    out = git(vault, "log", "--format=%s", "%s..%s" % (base, branch)).stdout.splitlines()
+    done = set()
+    for subj in out:
+        m = re.match(r"^(\S+: \S+ \S+)$", subj.strip())  # "<stem>: <verb> <slug>"
+        if m:
+            done.add(m.group(1))
+    return done
+
+
+def stem_of(cfg):
+    """The topic stem a config file declares — used to build the stem-qualified skip key."""
+    for line in open(cfg, encoding="utf-8"):
+        if line.strip().startswith("stem"):
+            return line.split("=", 1)[1].strip()
+    raise AssertionError("no stem in config %r" % cfg)
+
+
+def apply_sequence(cfg, vault_main, worktree, sources, base, branch, ops):
+    """Run an ordered verb sequence (one stem) on the proposal worktree, skipping verbs already
+    committed on the branch. Returns the `<verb> <slug>` actually invoked this pass (so a test can
+    assert an interrupted run resumes, and a finished run is a no-op)."""
+    done = applied_subjects(vault_main, base, branch)
+    stem = stem_of(cfg)
+    invoked = []
+    for verb, slug, content, trailers in ops:
+        if "%s: %s %s" % (stem, verb, slug) in done:
+            continue  # already on the branch — idempotent skip
+        args = [verb, slug]
+        for k, v in trailers:
+            args += ["--trailer", "%s:%s" % (k, v)]
+        r = run(cfg, worktree, sources, args, content)
+        if r.returncode != 0:
+            raise AssertionError("verb %r %r failed: %s" % (verb, slug, r.stderr.strip()))
+        invoked.append("%s %s" % (verb, slug))
+    return invoked
+
+
+def apply_t3(vault_main, worktree, sources, base, branch, ops):
+    """A T3 cross-stem composite applier: like apply_sequence, but each op carries its OWN config
+    (hence its own stem), so one proposal branch can move a concept across two siblings. Skips by the
+    full stem-qualified subject — the property propose-on-branch.md requires for cross-stem ops.
+    Returns the full `<stem>: <verb> <slug>` subjects invoked this pass."""
+    done = applied_subjects(vault_main, base, branch)
+    invoked = []
+    for cfg, verb, slug, content, trailers in ops:
+        subj = "%s: %s %s" % (stem_of(cfg), verb, slug)
+        if subj in done:
+            continue
+        args = [verb, slug]
+        for k, v in trailers:
+            args += ["--trailer", "%s:%s" % (k, v)]
+        r = run(cfg, worktree, sources, args, content)
+        if r.returncode != 0:
+            raise AssertionError("verb %r %r failed: %s" % (verb, slug, r.stderr.strip()))
+        invoked.append(subj)
+    return invoked
+
+
+HEAL = [("Heal-verdict", "split"), ("Heal-mode", "ratified"), ("Heal-confidence", "0.9"),
+        ("Sources-before", "https://example.com"), ("Sources-after", "https://example.com"),
+        ("Heal-run", "selftest-1")]
+
+
+def main():
+    root = tempfile.mkdtemp(prefix="mnt-selftest-")
+    try:
+        vault, cfg, sources = make_vault(root)
+        main0 = head(vault)
+        wt = os.path.join(root, "wt")
+
+        # === PROPOSAL ISOLATION ===
+        git(vault, "worktree", "add", "-q", "-b", "proposal/t1-alpha-1", wt, "main")
+        check("engine accepts the worktree as its vault root",
+              os.path.realpath(git(wt, "rev-parse", "--show-toplevel").stdout.strip()) == os.path.realpath(wt))
+        r = run(cfg, wt, sources, ["refresh", "alpha"] + [a for k, v in HEAL for a in ("--trailer", "%s:%s" % (k, v))],
+                entry("alpha", "Reconciled body of alpha — supersedes the original."))
+        check("proposal verb commits on the branch", r.returncode == 0, r.stderr)
+        ahead = git(vault, "rev-list", "--count", "main..proposal/t1-alpha-1").stdout.strip()
+        check("exactly one new commit on the proposal branch", ahead == "1", "ahead=%s" % ahead)
+        check("main HEAD unchanged before merge", head(vault) == main0)
+        check("main tree clean before merge", git(vault, "status", "--porcelain").stdout.strip() == "")
+        on_main = git(vault, "show", "main:test-topic/knowledge/alpha.md").stdout
+        check("main still holds the ORIGINAL entry pre-merge", "Original body of alpha." in on_main, on_main[:80])
+
+        # === PROVENANCE ===
+        body = git(vault, "log", "-1", "--format=%B", "proposal/t1-alpha-1").stdout
+        subj = git(vault, "log", "-1", "--format=%s", "proposal/t1-alpha-1").stdout.strip()
+        check("commit subject stays the bare engine form", subj == "test-topic: refresh alpha", subj)
+        check("Heal-mode trailer recorded", "Heal-mode: ratified" in body, body)
+        check("Heal-verdict trailer recorded", "Heal-verdict: split" in body, body)
+        check("git parses the trailers back out",
+              "ratified" in git(vault, "log", "-1", "--format=%(trailers:key=Heal-mode,valueonly)",
+                                "proposal/t1-alpha-1").stdout)
+
+        # === RATIFY = MERGE ===
+        m = git(vault, "merge", "-q", "--no-ff", "proposal/t1-alpha-1", "-m", "ratify: heal alpha")
+        check("ratify merge succeeds", m.returncode == 0, m.stderr)
+        after = git(vault, "show", "main:test-topic/knowledge/alpha.md").stdout
+        check("merge applied the heal to main", "Reconciled body of alpha" in after, after[:80])
+        git(vault, "worktree", "remove", "--force", wt)
+        git(vault, "branch", "-q", "-d", "proposal/t1-alpha-1")
+        check("ratify cleanup removes the worktree", "proposal/t1-alpha-1" not in git(vault, "worktree", "list").stdout)
+
+        # === REJECT leaves the vault byte-for-byte unchanged ===
+        pre_head, pre_tree = head(vault), tree_hash(vault)
+        git(vault, "worktree", "add", "-q", "-b", "proposal/t1-beta-1", wt, "main")
+        rc = run(cfg, wt, sources, ["capture", "beta", "--trailer", "Heal-mode:ratified"],
+                 entry("beta", "Body of the proposed new entry beta."))
+        check("proposal captures a NEW entry on the branch", rc.returncode == 0, rc.stderr)
+        check("beta exists on the branch", git(wt, "cat-file", "-e", "HEAD:test-topic/knowledge/beta.md").returncode == 0)
+        git(vault, "worktree", "remove", "--force", wt)
+        git(vault, "branch", "-q", "-D", "proposal/t1-beta-1")
+        check("reject: main HEAD unchanged", head(vault) == pre_head)
+        check("reject: main tree byte-for-byte identical", tree_hash(vault) == pre_tree)
+        check("reject: main worktree fully clean — no untracked leak",
+              git(vault, "status", "--porcelain", "--untracked-files=all").stdout.strip() == "")
+        check("reject: proposed entry never reached main",
+              git(vault, "cat-file", "-e", "HEAD:test-topic/knowledge/beta.md").returncode != 0)
+        check("reject: proposal branch is gone", git(vault, "rev-parse", "--verify", "proposal/t1-beta-1").returncode != 0)
+
+        # === RESTARTABLE COMPOSITE op: split alpha into alpha' + gamma ===
+        split = [
+            ("refresh", "alpha", entry("alpha", "Alpha after the split — narrowed scope."), HEAL),
+            ("capture", "gamma", entry("gamma", "Gamma — the half split out of alpha."), HEAL),
+        ]
+        git(vault, "worktree", "add", "-q", "-b", "proposal/t2-split-1", wt, "main")
+        # interruption: only the first verb lands this pass
+        first = apply_sequence(cfg, vault, wt, sources, "main", "proposal/t2-split-1", split[:1])
+        check("interrupted run applied only the reached verb", first == ["refresh alpha"], first)
+        # restart with the FULL sequence: the committed verb is skipped, the missing one runs
+        resume = apply_sequence(cfg, vault, wt, sources, "main", "proposal/t2-split-1", split)
+        check("restart resumes only the missing verb (idempotent skip)", resume == ["capture gamma"], resume)
+        n = git(vault, "rev-list", "--count", "main..proposal/t2-split-1").stdout.strip()
+        check("composite landed exactly 2 commits (no double-apply)", n == "2", "commits=%s" % n)
+        # a third full pass is a complete no-op — the sequence has fully converged
+        again = apply_sequence(cfg, vault, wt, sources, "main", "proposal/t2-split-1", split)
+        check("a fully-applied sequence re-runs to a no-op", again == [], again)
+        n2 = git(vault, "rev-list", "--count", "main..proposal/t2-split-1").stdout.strip()
+        check("idempotent: no extra commits on re-run", n2 == "2", "commits=%s" % n2)
+
+        # === SINGLE WRITER: worktree tree clean + only engine-shaped commits ===
+        check("worktree tree clean after the composite (no out-of-band edit)",
+              git(wt, "status", "--porcelain").stdout.strip() == "")
+        subs = git(vault, "log", "--format=%s", "main..proposal/t2-split-1").stdout.splitlines()
+        check("every proposal commit is engine-shaped `<stem>: <verb> <slug>`",
+              all(re.match(r"^test-topic: (capture|refresh|remove) \S+$", s) for s in subs), subs)
+        # RATIFY a MULTI-commit composite: the --no-ff merge applies EVERY verb commit to main
+        # (the single-commit ratify above does not exercise this). Done while the branch is still
+        # live in its worktree — merging from the primary checkout is unaffected by the worktree.
+        gamma_sha = git(vault, "log", "-1", "--format=%H", "--grep=capture gamma", "proposal/t2-split-1").stdout.strip()
+        mc = git(vault, "merge", "-q", "--no-ff", "proposal/t2-split-1", "-m", "ratify: split alpha into alpha+gamma")
+        check("multi-commit composite merges to main", mc.returncode == 0, mc.stderr)
+        check("merge landed the refresh verb (alpha narrowed on main)",
+              "Alpha after the split" in git(vault, "show", "main:test-topic/knowledge/alpha.md").stdout)
+        check("merge landed the capture verb (gamma present on main)",
+              git(vault, "cat-file", "-e", "main:test-topic/knowledge/gamma.md").returncode == 0)
+        idx_main = git(vault, "show", "main:test-topic/INDEX.md").stdout
+        check("merge: INDEX holds BOTH composite slugs",
+              "knowledge/alpha.md" in idx_main and "knowledge/gamma.md" in idx_main, idx_main)
+        git(vault, "worktree", "remove", "--force", wt)
+        git(vault, "branch", "-q", "-D", "proposal/t2-split-1")
+
+        # INDIVIDUALLY REVERTIBLE: reverting ONE composite commit (capture gamma) does not force
+        # reverting its sibling (refresh alpha), though both touched the shared INDEX.md.
+        rv = git(vault, "revert", "--no-edit", gamma_sha)
+        check("revert of one composite commit succeeds cleanly (no forced co-revert)", rv.returncode == 0, rv.stderr)
+        check("revert: tree clean — no INDEX conflict", git(vault, "status", "--porcelain").stdout.strip() == "")
+        check("revert: the reverted slug is undone (gamma gone from main)",
+              git(vault, "cat-file", "-e", "HEAD:test-topic/knowledge/gamma.md").returncode != 0)
+        check("revert: the sibling verb is untouched (alpha still narrowed)",
+              "Alpha after the split" in git(vault, "show", "HEAD:test-topic/knowledge/alpha.md").stdout)
+
+        # RESTARTABLE COMPOSITE with a REMOVE verb: merge zeta into alpha (refresh + remove).
+        # remove is the verb skip-by-log is REQUIRED for — a blind re-run of `remove <slug>` after
+        # it committed dies "entry not found"; this pins that the restart SKIPS it (split never
+        # exercises remove).
+        rz = run(cfg, vault, sources, ["capture", "zeta", "--trailer", "Heal-mode:auto"],
+                 entry("zeta", "Zeta — a sibling that will be absorbed into alpha."))
+        check("setup: zeta captured on main", rz.returncode == 0, rz.stderr)
+        merge_tr = [("Heal-verdict", "merge"), ("Heal-mode", "ratified"), ("Heal-run", "selftest-2")]
+        merge_op = [
+            ("refresh", "alpha", entry("alpha", "Alpha, now absorbing zeta's content."), merge_tr),
+            ("remove", "zeta", None, merge_tr),
+        ]
+        git(vault, "worktree", "add", "-q", "-b", "proposal/t2-merge-1", wt, "main")
+        mi = apply_sequence(cfg, vault, wt, sources, "main", "proposal/t2-merge-1", merge_op[:1])
+        check("merge-op interrupted: only the refresh applied", mi == ["refresh alpha"], mi)
+        mr = apply_sequence(cfg, vault, wt, sources, "main", "proposal/t2-merge-1", merge_op)
+        check("merge-op restart runs only the remove (refresh skipped)", mr == ["remove zeta"], mr)
+        # THE key check: a full re-run skips the committed remove — NOT retried into the engine's
+        # "entry not found" (which would raise inside apply_sequence).
+        mn = apply_sequence(cfg, vault, wt, sources, "main", "proposal/t2-merge-1", merge_op)
+        check("merge-op re-run is a no-op (committed remove is skipped, no 'not found' error)", mn == [], mn)
+        cnt = git(vault, "rev-list", "--count", "main..proposal/t2-merge-1").stdout.strip()
+        check("merge-op landed exactly 2 commits", cnt == "2", "commits=%s" % cnt)
+        check("merge-op: the removed entry's file is gone on the branch",
+              git(wt, "cat-file", "-e", "HEAD:test-topic/knowledge/zeta.md").returncode != 0)
+        check("merge-op: the removed entry's INDEX line is gone on the branch",
+              "knowledge/zeta.md" not in git(wt, "show", "HEAD:test-topic/INDEX.md").stdout)
+        msubs = git(vault, "log", "--format=%s", "main..proposal/t2-merge-1").stdout.splitlines()
+        check("merge-op commits are engine-shaped (incl. the remove verb)",
+              all(re.match(r"^test-topic: (capture|refresh|remove) \S+$", s) for s in msubs)
+              and "test-topic: remove zeta" in msubs, msubs)
+        git(vault, "worktree", "remove", "--force", wt)
+        git(vault, "branch", "-q", "-D", "proposal/t2-merge-1")
+
+        # === AUTO PATH (gate's mechanical branch): commit straight to main, Heal-mode: auto ===
+        before = int(git(vault, "rev-list", "--count", "HEAD").stdout)
+        ra = run(cfg, vault, sources, ["refresh", "alpha", "--trailer", "Heal-mode:auto",
+                                       "--trailer", "Heal-verdict:dead-link"],
+                 entry("alpha", "Alpha with a swapped-in live citation — mechanical, claim-preserving."))
+        check("auto heal commits straight to main", ra.returncode == 0, ra.stderr)
+        check("auto path adds exactly one commit to main",
+              int(git(vault, "rev-list", "--count", "HEAD").stdout) == before + 1)
+        check("auto commit carries Heal-mode: auto",
+              "Heal-mode: auto" in git(vault, "log", "-1", "--format=%B").stdout)
+
+        # === QUARANTINE (T1 / W3): a degraded refresh lands on main with the ⚠ down-rank and
+        # Heal-* provenance through the skill's route — and a sub-bar source WITHOUT the marker is
+        # refused (never written dirty). The engine's degraded-admit + ⚠ unit is pinned in
+        # engine/selftest; this pins it end-to-end through the maintenance refresh+provenance route,
+        # which is W3's degraded-quarantine acceptance criterion. The route CHOICE (quarantine ->
+        # proposal, Heal-mode: ratified) is skill prose, not engine code, so it is out of this harness.
+        subbar = ('---\nname: alpha\ndescription: trigger for alpha\nlast_refreshed: 2026-06-20\n'
+                  'sources:\n  - Author, "Decayed", 2026 — https://medium.com/x\n%s---\n\n%s\n')
+        dirty = run(cfg, vault, sources, ["refresh", "alpha", "--trailer", "Heal-mode:auto"],
+                    subbar % ("", "Alpha with only a sub-bar source and no degraded marker."))
+        check("sub-bar refresh WITHOUT a degraded marker is refused (not written dirty)",
+              dirty.returncode != 0 and "source authority" in dirty.stderr, dirty.stderr)
+        before_q = int(git(vault, "rev-list", "--count", "HEAD").stdout)
+        rq = run(cfg, vault, sources,
+                 ["refresh", "alpha", "--trailer", "Heal-mode:ratified", "--trailer", "Heal-verdict:degraded"],
+                 subbar % ('degraded: "sole source medium.com below the bar; no replacement found"\n',
+                           "Alpha, quarantined: its only source decayed below the bar."))
+        check("degraded refresh is admitted via the quarantine exemption", rq.returncode == 0, rq.stderr)
+        # The ratified lighter-path write (skill routes quarantine -> proposal); the one commit lands
+        # on main on the maintainer's yes — NOT an auto write (which the round-1 design removed).
+        check("quarantine ratified-refresh adds exactly one commit to main",
+              int(git(vault, "rev-list", "--count", "HEAD").stdout) == before_q + 1)
+        check("quarantined entry is ⚠-down-ranked in INDEX",
+              "- ⚠ [alpha](knowledge/alpha.md)" in git(vault, "show", "HEAD:test-topic/INDEX.md").stdout)
+        qbody = git(vault, "log", "-1", "--format=%B").stdout
+        check("quarantine commit carries Heal-verdict: degraded + Heal-mode: ratified",
+              "Heal-verdict: degraded" in qbody and "Heal-mode: ratified" in qbody, qbody)
+
+        # === CROSS-STEM COMPOSITE (T3, W5): a boundary move spanning two siblings on ONE branch ===
+        # A T3 op's vault side can span two stems — moving a concept from sibling A to sibling B is
+        # `remove A/<slug>` + `capture B/<slug>` under two --config. This pins that the restartable
+        # applier skips by the FULL stem-qualified subject (so two stems can't collide), resumes only
+        # the missing cross-stem verb, re-runs to a no-op, and that ratify-merge lands BOTH stems. The
+        # FAMILY.md/config registry side is plain git (a diff'd file edit) — skill prose, not here.
+        other_cfg = add_topic(root, vault, "other-topic")
+        ro = run(other_cfg, vault, sources, ["capture", "omega", "--trailer", "Heal-mode:auto"],
+                 entry("omega", "Omega — an existing concept in the other sibling."))
+        check("t3 setup: second sibling seeded on main", ro.returncode == 0, ro.stderr)
+        rd = run(cfg, vault, sources, ["capture", "delta", "--trailer", "Heal-mode:auto"],
+                 entry("delta", "Delta — a concept that belongs in the other sibling."))
+        check("t3 setup: boundary-move source concept captured in sibling A", rd.returncode == 0, rd.stderr)
+
+        FAM = [("Heal-verdict", "boundary-move"), ("Heal-mode", "ratified"), ("Heal-run", "selftest-t3")]
+        # move delta A->B: remove from test-topic, capture into other-topic — two stems, one branch
+        move = [
+            (cfg,       "remove",  "delta", None,                                                       FAM),
+            (other_cfg, "capture", "delta", entry("delta", "Delta — now living in the other sibling."), FAM),
+        ]
+        git(vault, "worktree", "add", "-q", "-b", "proposal/t3-boundary-1", wt, "main")
+        # interruption: only the cross-stem remove (sibling A) lands this pass
+        mv1 = apply_t3(vault, wt, sources, "main", "proposal/t3-boundary-1", move[:1])
+        check("t3 interrupted: only the remove (sibling A) applied", mv1 == ["test-topic: remove delta"], mv1)
+        # restart with the full move: the committed remove is skipped, the cross-stem capture runs
+        mv2 = apply_t3(vault, wt, sources, "main", "proposal/t3-boundary-1", move)
+        check("t3 restart resumes only the cross-stem capture (sibling B)",
+              mv2 == ["other-topic: capture delta"], mv2)
+        # a full re-run is a no-op — both stems' subjects are on the branch (stem-qualified skip)
+        mv3 = apply_t3(vault, wt, sources, "main", "proposal/t3-boundary-1", move)
+        check("t3 cross-stem composite re-runs to a no-op (stem-qualified skip)", mv3 == [], mv3)
+        nt = git(vault, "rev-list", "--count", "main..proposal/t3-boundary-1").stdout.strip()
+        check("t3 composite landed exactly 2 commits across two stems", nt == "2", "commits=%s" % nt)
+        check("t3: main untouched before merge (delta still in sibling A, absent from sibling B)",
+              git(vault, "cat-file", "-e", "main:test-topic/knowledge/delta.md").returncode == 0
+              and git(vault, "cat-file", "-e", "main:other-topic/knowledge/delta.md").returncode != 0)
+        # ratify: the --no-ff merge lands BOTH stems' changes on main
+        tm = git(vault, "merge", "-q", "--no-ff", "proposal/t3-boundary-1", "-m", "ratify: move delta A->B")
+        check("t3 cross-stem composite merges to main", tm.returncode == 0, tm.stderr)
+        check("t3 ratify: delta removed from sibling A on main",
+              git(vault, "cat-file", "-e", "main:test-topic/knowledge/delta.md").returncode != 0)
+        check("t3 ratify: delta present in sibling B on main",
+              git(vault, "cat-file", "-e", "main:other-topic/knowledge/delta.md").returncode == 0)
+        check("t3 ratify: sibling A INDEX dropped delta, sibling B INDEX gained it",
+              "knowledge/delta.md" not in git(vault, "show", "main:test-topic/INDEX.md").stdout
+              and "knowledge/delta.md" in git(vault, "show", "main:other-topic/INDEX.md").stdout)
+        git(vault, "worktree", "remove", "--force", wt)
+        git(vault, "branch", "-q", "-D", "proposal/t3-boundary-1")
+
+        # The boundary move above uses two DIFFERENT verbs (remove/capture), so its two subjects never
+        # share a bare `<verb> <slug>` — it does not actually exercise a cross-stem collision. This
+        # block does: capture the SAME slug into BOTH siblings under an interrupted restart. Under the
+        # bare key both are "capture shared" and pass 2 would WRONGLY skip sibling B (silently losing
+        # it); under the full stem-qualified subject they are distinct, so the restart resumes B. This
+        # is the discriminating test for the stem-qualified skip (a bare-key applier fails it).
+        COL = [("Heal-verdict", "add-sibling"), ("Heal-mode", "ratified"), ("Heal-run", "selftest-col")]
+        collide = [
+            (cfg,       "capture", "shared", entry("shared", "Shared — sibling A's take."), COL),
+            (other_cfg, "capture", "shared", entry("shared", "Shared — sibling B's take."), COL),
+        ]
+        git(vault, "worktree", "add", "-q", "-b", "proposal/t3-collide-1", wt, "main")
+        c1 = apply_t3(vault, wt, sources, "main", "proposal/t3-collide-1", collide[:1])
+        check("t3 collision: pass 1 lands only sibling A's capture", c1 == ["test-topic: capture shared"], c1)
+        c2 = apply_t3(vault, wt, sources, "main", "proposal/t3-collide-1", collide)
+        check("t3 collision: restart resumes sibling B's same-slug capture (NOT bare-key skipped)",
+              c2 == ["other-topic: capture shared"], c2)
+        check("t3 collision: both siblings hold their own 'shared' entry on the branch",
+              git(wt, "cat-file", "-e", "HEAD:test-topic/knowledge/shared.md").returncode == 0
+              and git(wt, "cat-file", "-e", "HEAD:other-topic/knowledge/shared.md").returncode == 0)
+        cc = git(vault, "rev-list", "--count", "main..proposal/t3-collide-1").stdout.strip()
+        check("t3 collision: exactly 2 commits (neither stem's capture dropped)", cc == "2", "commits=%s" % cc)
+        git(vault, "worktree", "remove", "--force", wt)
+        git(vault, "branch", "-q", "-D", "proposal/t3-collide-1")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    passed = sum(1 for ok in _checks if ok)
+    total = len(_checks)
+    print("\n%s: %d/%d checks passed" % ("PASS" if passed == total else "FAIL", passed, total))
+    return 0 if passed == total else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

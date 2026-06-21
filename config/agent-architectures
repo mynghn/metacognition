@@ -2,3 +2,4 @@ stem = agent-architectures
 index_heading = Concepts
 env_prefix = AA
 tier = common
+volatility = 180
