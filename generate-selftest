@@ -2,13 +2,16 @@
 """generate-selftest — derivation + guard tests for the sibling generator (G1 layer).
 
 Encodes the adversarial findings so they cannot regress:
-  - CONFIG PARITY (SPEC#INV-1): the derived config for each shipped sibling, given the right
-    --index-heading, reproduces config/<stem> BYTE-FOR-BYTE — and is exactly 4 fields, with
-    NO `noun` line (the installer computes @NOUN@ from index_heading; storing one diverges).
+  - CONFIG PARITY (admit-only-authoritative-sources): the derived config for each shipped sibling,
+    given the right --index-heading, reproduces config/<stem>'s four SCAFFOLD fields byte-for-byte —
+    exactly {stem, index_heading, env_prefix, tier}, with NO `noun` line (the installer computes
+    @NOUN@ from index_heading; storing one diverges) and NO `volatility` line (it is optional and
+    per-topic — a human-tuned freshness threshold health-check defaults when absent — so the generator
+    correctly does not fabricate it; a shipped config may carry it as a post-scaffold addition).
   - env_prefix = stem initials, with a UNIQUENESS GUARD the installer lacks: a collision is a
     CLEAN error (no traceback), resolvable with --env-prefix. (Near-miss: agent-architectures=AA
     vs agent-runtime=AR.)
-  - index_heading has no registry source -> defaults to "Concepts" (SPEC#O-2: stem-only
+  - index_heading has no registry source -> defaults to "Concepts" (a stem-only invocation still
     yields a valid config), overridable.
   - tier comes from the FAMILY.md section; an off-registry stem with no --tier is a clean error.
   - DESCRIPTION is SEED-AND-FLAG, never fabricated on the auto-invoke path: mechanical opener +
@@ -66,17 +69,23 @@ def desc_line(stdout):
 
 
 def main():
-    # ---- config parity vs the three shipped siblings (INV-1) ----
+    # ---- config parity vs the three shipped siblings (authoritative-source admission) ----
     parity = [("context-engineering", []),
               ("prompt-engineering", ["--index-heading", "Techniques"]),
               ("tool-design", ["--index-heading", "Practices"])]
     for stem, flags in parity:
         r = run([stem] + flags)
-        shipped = open(os.path.join(CONFIG, stem), encoding="utf-8").read().splitlines()
+        shipped_all = open(os.path.join(CONFIG, stem), encoding="utf-8").read().splitlines()
+        # Compare against the shipped config's four SCAFFOLD fields only — a shipped config may carry
+        # an optional, post-scaffold `volatility` (per-topic, human-tuned; health-check defaults it),
+        # which the generator correctly does not fabricate.
+        shipped = [ln for ln in shipped_all if ln.split(" = ", 1)[0] in CONFIG_KEYS]
         derived = cfg_block(r.stdout)
-        check("parity: %s derived == shipped config" % stem,
+        check("parity: %s derived == shipped's four scaffold fields" % stem,
               r.returncode == 0 and derived == shipped, "%r vs %r / %s" % (derived, shipped, r.stderr))
         check("parity: %s config has no `noun` field" % stem, all("noun" != ln.split(" = ")[0] for ln in derived))
+        check("parity: %s generator omits the optional `volatility` (per-topic, health-check-defaulted)" % stem,
+              all("volatility" != ln.split(" = ")[0] for ln in derived))
 
     # ---- env_prefix derivation + the uniqueness guard the installer lacks ----
     r = run(["agent-architectures"])
@@ -179,6 +188,12 @@ def main():
         check("G2: scaffold writes config + wiring + INDEX + knowledge/",
               r.returncode == 0 and all(os.path.exists(p) for p in (cfg_f, wir_f, idx_f, kdir)), r.stderr)
         check("G2: knowledge/ is empty (no entries)", os.path.isdir(kdir) and os.listdir(kdir) == [])
+        # the scaffolded config is EXACTLY the four scaffold fields, in order — no unexpected field
+        # emitted (the parity check filters to CONFIG_KEYS, so a stray emitted field would otherwise
+        # be silently dropped there; this catches it loudly on the real written file).
+        cfg_keys_written = [l.split(" = ", 1)[0] for l in open(cfg_f, encoding="utf-8").read().splitlines() if " = " in l]
+        check("G2: scaffolded config is exactly the four scaffold fields (no extra field)",
+              cfg_keys_written == list(CONFIG_KEYS), cfg_keys_written)
         idx = open(idx_f, encoding="utf-8").read()
         check("G2: INDEX has the engine's required '## Concepts' + comment",
               "\n## Concepts\n" in idx and "<!-- one line per concept; appended by capture/refresh via the shared engine -->" in idx)
@@ -188,7 +203,7 @@ def main():
         check("G2: INDEX renders from templates/index-skeleton.md (boilerplate single-sourced there)",
               "consume during the content build" in idx and os.path.isfile(os.path.join(ROOT, "templates", "index-skeleton.md")))
 
-        # header byte-parity vs the shipped vault INDEX — the ONLY diff is the ## Seeds insert (O-5)
+        # header byte-parity vs the shipped vault INDEX — the only diff is the ## Seeds insert
         if os.path.isfile(SHIPPED_INDEX):
             run_write(["context-engineering", "--config-dir", os.path.join(sb, "c2"),
                        "--wiring-dir", os.path.join(sb, "w2"), "--vault", os.path.join(sb, "v2"), "--no-install"])
@@ -196,12 +211,21 @@ def main():
             shipped_full = open(SHIPPED_INDEX, encoding="utf-8").read()
             header = "\n".join(shipped_full.split("\n")[:7])  # H1 .. "Each line:"
             check("G2: generated INDEX header byte-identical to shipped", gen_ce.startswith(header), header)
-            # strong O-3/INV-1 guard: generated INDEX minus the ## Seeds insert == shipped pre-entry header
+            # strong holistic guard: generated INDEX minus the ## Seeds insert == shipped pre-entry header
             mfirst = re.search(r"(?m)^- \[", shipped_full)
             shipped_pre = (shipped_full[:mfirst.start()] if mfirst else shipped_full).rstrip("\n")
             gen_no_seeds = re.sub(r"## Seeds\n.*?\n\n(?=## )", "", gen_ce, flags=re.S).rstrip("\n")
-            check("G2: generated INDEX == shipped header with ONLY the ## Seeds insert added",
-                  gen_no_seeds == shipped_pre, "tail gen=%r vs shipped=%r" % (gen_no_seeds[-60:], shipped_pre[-60:]))
+            # Compare MODULO the template's degraded-marker clause: templates/index-skeleton.md (the
+            # generator's source of truth) carries it, and deployed vault INDEX headers are migrating
+            # to it (today every sibling's header still predates it — a pending vault heal, a V1
+            # target). Stripping the template-owned clause from BOTH sides keeps this green whether or
+            # not a given deployed INDEX has migrated, while still catching any OTHER header drift.
+            skel = open(os.path.join(ROOT, "templates", "index-skeleton.md"), encoding="utf-8").read()
+            mclause = re.search(r"description>`(\. A line.*?)\n\n", skel, flags=re.S)
+            clause = mclause.group(1) if mclause else ""
+            check("G2: generated INDEX == shipped header (modulo the template's degraded-marker clause) + only the ## Seeds insert",
+                  bool(clause) and gen_no_seeds.replace(clause, "") == shipped_pre.replace(clause, ""),
+                  "tail gen=%r vs shipped=%r" % (gen_no_seeds.replace(clause, "")[-60:], shipped_pre.replace(clause, "")[-60:]))
         else:
             print("  SKIP G2 header parity — shipped vault INDEX not at %s" % SHIPPED_INDEX)
 
@@ -216,8 +240,10 @@ def main():
         subprocess.run(["git", "-C", vault, "init", "-q"], check=True)
         subprocess.run(["git", "-C", vault, "config", "user.email", "t@t"], check=True)
         subprocess.run(["git", "-C", vault, "config", "user.name", "t"], check=True)
+        # source host must clear the SOURCES.md allowlist (which no longer admits example.com; the
+        # engine auto-resolves the repo's SOURCES.md even without an explicit --sources).
         entry = ("---\nname: probe-entry\ndescription: a probe trigger\nlast_refreshed: 2026-01-01\n"
-                 "sources:\n  - http://example.com\n---\n\nbody\n")
+                 "sources:\n  - https://arxiv.org/abs/2310.06770\n---\n\nbody\n")
         e = subprocess.run([sys.executable, ENGINE, "--config", cfg_f, "--vault", vault, "capture", "probe-entry"],
                            input=entry, capture_output=True, text=True)
         check("G2: engine captures into the generated skeleton (born-running)",
