@@ -35,7 +35,7 @@ Every `capture`/`refresh`/`remove` carries the skill's `Heal-*` trailers. The en
 vocabulary-free — this schema is the skill's, recorded as generic git trailers:
 
 ```
---trailer Heal-verdict:current|dead-link|policy-fix|stale|degraded|split|merge|retire
+--trailer Heal-verdict:current|dead-link|policy-fix|stale|degraded|split|merge|retire|re-scope
 --trailer Heal-mode:auto|ratified          # auto path → auto; proposal path → ratified
 --trailer Heal-confidence:<0..1>
 --trailer Sources-before:<url>, ...

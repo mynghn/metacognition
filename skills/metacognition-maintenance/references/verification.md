@@ -41,7 +41,10 @@ independent sub-agents (each provider spawns them with its own mechanism). No ag
 Spawn **N independent reviewers** (default **3**; keep **N odd**), none of which produced the
 reconciliation. **Each reviewer independently evaluates the WHOLE candidate against ALL of the
 checks below** — do NOT split the checks across reviewers: a flaw only one reviewer is assigned to
-look for would be outvoted by the rest under the majority rule. Decorrelate by *independence*
+look for would be outvoted by the rest under the majority rule. **For a multi-entry proposal** (a T2
+sibling or T3 family diff) the "candidate" each reviewer evaluates is the **whole diff** — every
+entry's candidate *and* any candidate-less `remove` — not one entry; that whole-diff view is what
+lets a reviewer tell a cross-entry *move* from a loss (the deterministic floor, per-entry, cannot). Decorrelate by *independence*
 instead — each reasons on its own, none sees another's verdict, and vary the framing/emphasis per
 reviewer so they do not share one blind spot. Each is told to **assume the candidate is wrong and
 try to refute it**, and to **default to REJECT when uncertain** (the bar is "is this demonstrably
@@ -52,7 +55,13 @@ correct?", not "is it plausible?"). Every reviewer checks:
   failure mode.
 - **No-net-loss adjudication** — for each drop the tool flagged (link / number / source) and each
   prose claim or cross-link gone from the candidate, decide: sanctioned supersession (e.g. a number
-  updated against a re-fetched source, a link retired deliberately) or silent loss?
+  updated against a re-fetched source, a link retired deliberately) or silent loss? **For a
+  multi-entry proposal** (a T2 sibling or T3 family diff), the review unit is the **whole diff**, not
+  one entry, and the tool is single-entry — so a drop flagged on one entry may be content **relocated
+  to another entry in the same diff** (a split moving content to a new entry, a merge absorbing one
+  into another, a boundary re-scope). Adjudicate each such drop against the whole diff: confirm the
+  content reappears in the receiving entry (a move), versus genuinely gone (a loss). A `remove` has no
+  candidate for the tool to diff at all, so its loss-vs-obsolete call is wholly this judgment.
 - **Scope drift** — does the entry still sit within its declared `description` boundary, or has it
   quietly become a different entry? (A `description-changed` flag is the prompt to check this.)
 - **Corroboration** — a load-bearing number the heal introduces or changes MUST carry at least one

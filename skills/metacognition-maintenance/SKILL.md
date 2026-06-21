@@ -48,7 +48,8 @@ pass surfaces *candidates*, it never acts.
    - **T1 — heal** one entry: reconcile it in place against current sources, routing the result
      auto / proposal / quarantine. See **`references/heal-t1.md`**.
    - **T2 — sibling evolution**: re-derive the *whole* sibling, emitting a keep/refresh/split/
-     merge/retire/re-scope diff. Never a blind single-entry insert.
+     merge/retire/re-scope diff as a proposal. Never a blind single-entry insert. See
+     **`references/sibling-evolution.md`**.
    - **T3 — family evolution**: add/merge/retire a sibling or move a boundary, with the
      `FAMILY.md` registry edit.
 
@@ -78,6 +79,9 @@ pass surfaces *candidates*, it never acts.
   no-net-loss diff, and the default-REJECT adversarial quorum. **Read before any write.**
 - **`references/heal-t1.md`** — the **T1 heal** procedure: signal→route mapping and the
   auto / proposal / quarantine outcomes for one entry. Read when healing a single entry.
+- **`references/sibling-evolution.md`** — the **T2 sibling-evolution** procedure: whole-sibling
+  re-derivation → a keep/refresh/split/merge/retire/re-scope diff, emitted as one proposal. Read
+  when the sibling's decomposition (not just one entry's content) is what's wrong.
 
-> T2 (sibling) and T3 (family) procedures are added as their references land; until then, follow
-> the spine + envelope above, the T1 reference for single-entry heals, and the two laws.
+> The T3 (family) procedure is added as its reference lands; until then, follow the spine + envelope
+> above, the T1/T2 references for entry and sibling work, and the two laws.
