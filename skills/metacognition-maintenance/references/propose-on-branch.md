@@ -35,13 +35,21 @@ Every `capture`/`refresh`/`remove` carries the skill's `Heal-*` trailers. The en
 vocabulary-free — this schema is the skill's, recorded as generic git trailers:
 
 ```
---trailer Heal-verdict:current|dead-link|policy-fix|stale|degraded|split|merge|retire|re-scope
+--trailer Heal-verdict:current|dead-link|policy-fix|stale|degraded|split|merge|retire|re-scope|add-sibling|merge-sibling|retire-sibling|boundary-move
 --trailer Heal-mode:auto|ratified          # auto path → auto; proposal path → ratified
 --trailer Heal-confidence:<0..1>
 --trailer Sources-before:<url>, ...
 --trailer Sources-after:<url>, ...
 --trailer Heal-run:<id>                     # one id per maintenance run, to group its commits
 ```
+
+The verdict vocabulary is **skill-owned and extensible** — the engine is vocabulary-free (it records
+the trailer, never reads it), so a tier adds a verdict as it lands with no engine change. The leaf
+verdicts (`current`…`re-scope`) cover T1/T2; the family verdicts (`add-sibling`…`boundary-move`) name
+T3 family ops (`family-evolution.md`). A T3 change spans **two repos**, so its registry-side commit
+(a plain `git` edit of `@FAMILY@`/`config/`, *not* an engine write) carries the **same `Heal-run` id**
+in its message trailer block — git trailers are plain message lines — linking both repos' commits of
+one family change.
 
 `git log` parses these back out (`--format=%(trailers:key=Heal-mode,valueonly)`), so every
 change is auditable and individually revertible — the subject stays the bare
@@ -135,10 +143,14 @@ branch" as done is how the sequence stays idempotent across a restart without tr
 errors. (On any single git failure mid-verb the engine rolls its own change back to HEAD, so the
 branch only ever holds whole, recoverable verb-commits — exactly the units this log reads.)
 
-The skip is keyed on `<verb> <slug>`, not on content — it assumes each verb's intended content is
-deterministic across passes. A restart that re-plans an already-committed verb with *different*
-content must start a fresh branch, not resume this one (resuming would skip the verb and keep the
-first pass's content).
+The skip is keyed on the full engine-shaped subject `<stem>: <verb> <slug>`, not on content — it
+assumes each verb's intended content is deterministic across passes. Keying on the **stem-qualified**
+subject (not bare `<verb> <slug>`) keeps it correct for a **T3 cross-stem composite**, where one
+proposal branch carries verbs under two different `--config @CONFIG_DIR@/<stem>` (e.g. a boundary
+move `remove`s from sibling A and `capture`s into sibling B) and two stems could otherwise share a
+`<verb> <slug>` pair. A restart that re-plans an already-committed verb with *different* content must
+start a fresh branch, not resume this one (resuming would skip the verb and keep the first pass's
+content).
 
 ## What the spine guarantees (verified)
 

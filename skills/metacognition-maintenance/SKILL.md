@@ -15,6 +15,7 @@ It assumes the installer has resolved these absolute paths:
 - `@ENGINE_BIN@` — the `kb-engine` writer; a target in topic `<stem>` uses `--config @CONFIG_DIR@/<stem>`
 - `@CONFIG_DIR@` — per-sibling configs · `@VAULT@` — vault repo root · `@SOURCES@` — authority policy
 - `@HEALTH_CHECK@` — the deterministic decay detector · `@NO_NET_LOSS@` — the no-net-loss diff (the verification floor)
+- `@FAMILY@` — the `FAMILY.md` family registry · `@FAMILY_REPO@` — the engine repo root holding `@FAMILY@`/`@CONFIG_DIR@` (the registry side of a T3 family change)
 
 ## Two laws (never violated)
 
@@ -23,7 +24,9 @@ It assumes the installer has resolved these absolute paths:
    refresh, remove — is a `kb-engine` commit, so it is validated, source-gated, and recorded as one
    recoverable commit in the vault's history. (Family-level policy/registry files — `FAMILY.md`,
    `SOURCES.md` — are engine-repo artifacts, not vault content, and fall outside this rule; they
-   evolve through their own ratify path, handled by the family/policy tiers.)
+   evolve through their own plain-`git` propose→ratify path. `FAMILY.md` + `config/` are owned by the
+   family tier, T3; `SOURCES.md` policy edits ride the same shape but no tier in this feature owns
+   them.)
 2. **Only authoritative sources, or quarantine.** Every write is gated against `@SOURCES@`. If a
    reconciliation's sole support falls below the bar and no at-or-above replacement is found, do
    **not** write it dirty and do **not** delete the entry — `refresh` it *with* a
@@ -50,11 +53,14 @@ pass surfaces *candidates*, it never acts.
    - **T2 — sibling evolution**: re-derive the *whole* sibling, emitting a keep/refresh/split/
      merge/retire/re-scope diff as a proposal. Never a blind single-entry insert. See
      **`references/sibling-evolution.md`**.
-   - **T3 — family evolution**: add/merge/retire a sibling or move a boundary, with the
-     `FAMILY.md` registry edit.
+   - **T3 — family evolution**: re-derive the *whole family*, emitting an add/merge/retire-sibling
+     or boundary-move as a proposal that spans **two repos** — the sibling entries (vault, via the
+     engine) **and** the `@FAMILY@` registry + `config/` edit (engine repo, plain `git`; the engine
+     does not write registry files). Carries the admission-test verdict and a bilateral
+     reconciliation. See **`references/family-evolution.md`**.
 
    T2/T3 always re-derive the whole sibling/family before emitting any op (the holistic check) —
-   there is no single-entry insert path.
+   there is no single-entry (or single-sibling) insert path.
 3. **Research & reconcile** — gather current state-of-the-art *with citations* (web search, or a
    research skill if your provider has one) and reconcile in place: supersede stale claims in the
    one canonical entry, never append a competing view. Restamp `last_refreshed`; refresh `sources`.
@@ -82,6 +88,7 @@ pass surfaces *candidates*, it never acts.
 - **`references/sibling-evolution.md`** — the **T2 sibling-evolution** procedure: whole-sibling
   re-derivation → a keep/refresh/split/merge/retire/re-scope diff, emitted as one proposal. Read
   when the sibling's decomposition (not just one entry's content) is what's wrong.
-
-> The T3 (family) procedure is added as its reference lands; until then, follow the spine + envelope
-> above, the T1/T2 references for entry and sibling work, and the two laws.
+- **`references/family-evolution.md`** — the **T3 family-evolution** procedure: whole-family
+  re-derivation → add/merge/retire a sibling or move a boundary, emitted as one cross-repo proposal
+  (vault entries + the `@FAMILY@` registry edit) with the admission verdict and bilateral
+  reconciliation. Read when the disruption crosses sibling boundaries.

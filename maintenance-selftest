@@ -36,6 +36,13 @@ Each test pins one load-bearing property of the spine:
     the `⚠` INDEX down-rank and `Heal-verdict: degraded` provenance. Pins the degraded write through
     the skill's refresh+provenance route end-to-end (the engine's degraded-admit + ⚠ unit lives in
     engine/selftest); the route CHOICE (quarantine → proposal) is skill prose, out of this harness.
+  - CROSS-STEM COMPOSITE (T3, W5): a family op's vault side can span TWO siblings on one proposal
+    branch — a boundary move is `remove A/<slug>` + `capture B/<slug>` under two different --config.
+    Pins that the restartable applier skips by the FULL stem-qualified subject `<stem>: <verb> <slug>`
+    (so two stems can't collide on a shared `<verb> <slug>`), resumes only the missing verb across
+    stems, re-runs to a no-op, and that ratify-merge lands BOTH stems' changes. The FAMILY.md/config
+    registry side of a T3 op is plain git (a file edit reviewed as a diff) — nothing engine-specific,
+    so it is skill prose (family-evolution.md), out of this harness.
 """
 import os
 import re
@@ -102,6 +109,20 @@ def make_vault(root):
     return vault, cfg, sources
 
 
+def add_topic(root, vault, stem):
+    """Seed a SECOND sibling (its topic folder + INDEX + its own config) in the same vault, so a T3
+    cross-stem composite has two stems to move a concept between. The empty INDEX is committed by the
+    sibling's first engine capture (same as make_vault's first capture commits test-topic's INDEX)."""
+    kdir = os.path.join(vault, stem, "knowledge")
+    os.makedirs(kdir)
+    with open(os.path.join(vault, stem, "INDEX.md"), "w", encoding="utf-8") as fh:
+        fh.write(INDEX_SKELETON)
+    cfg = os.path.join(root, "config-" + stem)
+    with open(cfg, "w", encoding="utf-8") as fh:
+        fh.write("stem = %s\nindex_heading = Concepts\nenv_prefix = OT\ntier = situational\n" % stem)
+    return cfg
+
+
 def run(cfg, vault, sources, args, stdin=None):
     """Invoke the engine exactly as the skill does — --config, --vault (main OR a worktree),
     --sources. Returns the CompletedProcess."""
@@ -116,24 +137,36 @@ def run(cfg, vault, sources, args, stdin=None):
 # log (main..branch) — the proposal branch IS the op-progress record, so an
 # interrupted sequence re-runs only the verbs not yet committed, and a completed sequence re-runs
 # to a no-op. This is what makes a blind engine retry (which would error) unnecessary.
-def applied_verbs(vault, base, branch):
+def applied_subjects(vault, base, branch):
+    """The full engine-shaped subjects (`<stem>: <verb> <slug>`) already committed on the branch — the
+    op-progress record the restartable applier skips by. Stem-qualified (not bare `<verb> <slug>`) so
+    it stays correct for a T3 cross-stem composite, where two stems could share a `<verb> <slug>`."""
     out = git(vault, "log", "--format=%s", "%s..%s" % (base, branch)).stdout.splitlines()
     done = set()
     for subj in out:
-        m = re.match(r"^\S+: (\S+ \S+)$", subj.strip())  # "<stem>: <verb> <slug>"
+        m = re.match(r"^(\S+: \S+ \S+)$", subj.strip())  # "<stem>: <verb> <slug>"
         if m:
             done.add(m.group(1))
     return done
 
 
+def stem_of(cfg):
+    """The topic stem a config file declares — used to build the stem-qualified skip key."""
+    for line in open(cfg, encoding="utf-8"):
+        if line.strip().startswith("stem"):
+            return line.split("=", 1)[1].strip()
+    raise AssertionError("no stem in config %r" % cfg)
+
+
 def apply_sequence(cfg, vault_main, worktree, sources, base, branch, ops):
-    """Run an ordered verb sequence on the proposal worktree, skipping verbs already committed
-    on the branch. Returns the list of verbs actually invoked this pass (so a test can assert an
-    interrupted run resumes, and a finished run is a no-op)."""
-    done = applied_verbs(vault_main, base, branch)
+    """Run an ordered verb sequence (one stem) on the proposal worktree, skipping verbs already
+    committed on the branch. Returns the `<verb> <slug>` actually invoked this pass (so a test can
+    assert an interrupted run resumes, and a finished run is a no-op)."""
+    done = applied_subjects(vault_main, base, branch)
+    stem = stem_of(cfg)
     invoked = []
     for verb, slug, content, trailers in ops:
-        if "%s %s" % (verb, slug) in done:
+        if "%s: %s %s" % (stem, verb, slug) in done:
             continue  # already on the branch — idempotent skip
         args = [verb, slug]
         for k, v in trailers:
@@ -142,6 +175,27 @@ def apply_sequence(cfg, vault_main, worktree, sources, base, branch, ops):
         if r.returncode != 0:
             raise AssertionError("verb %r %r failed: %s" % (verb, slug, r.stderr.strip()))
         invoked.append("%s %s" % (verb, slug))
+    return invoked
+
+
+def apply_t3(vault_main, worktree, sources, base, branch, ops):
+    """A T3 cross-stem composite applier: like apply_sequence, but each op carries its OWN config
+    (hence its own stem), so one proposal branch can move a concept across two siblings. Skips by the
+    full stem-qualified subject — the property propose-on-branch.md requires for cross-stem ops.
+    Returns the full `<stem>: <verb> <slug>` subjects invoked this pass."""
+    done = applied_subjects(vault_main, base, branch)
+    invoked = []
+    for cfg, verb, slug, content, trailers in ops:
+        subj = "%s: %s %s" % (stem_of(cfg), verb, slug)
+        if subj in done:
+            continue
+        args = [verb, slug]
+        for k, v in trailers:
+            args += ["--trailer", "%s:%s" % (k, v)]
+        r = run(cfg, worktree, sources, args, content)
+        if r.returncode != 0:
+            raise AssertionError("verb %r %r failed: %s" % (verb, slug, r.stderr.strip()))
+        invoked.append(subj)
     return invoked
 
 
@@ -331,6 +385,80 @@ def main():
         qbody = git(vault, "log", "-1", "--format=%B").stdout
         check("quarantine commit carries Heal-verdict: degraded + Heal-mode: ratified",
               "Heal-verdict: degraded" in qbody and "Heal-mode: ratified" in qbody, qbody)
+
+        # === CROSS-STEM COMPOSITE (T3, W5): a boundary move spanning two siblings on ONE branch ===
+        # A T3 op's vault side can span two stems — moving a concept from sibling A to sibling B is
+        # `remove A/<slug>` + `capture B/<slug>` under two --config. This pins that the restartable
+        # applier skips by the FULL stem-qualified subject (so two stems can't collide), resumes only
+        # the missing cross-stem verb, re-runs to a no-op, and that ratify-merge lands BOTH stems. The
+        # FAMILY.md/config registry side is plain git (a diff'd file edit) — skill prose, not here.
+        other_cfg = add_topic(root, vault, "other-topic")
+        ro = run(other_cfg, vault, sources, ["capture", "omega", "--trailer", "Heal-mode:auto"],
+                 entry("omega", "Omega — an existing concept in the other sibling."))
+        check("t3 setup: second sibling seeded on main", ro.returncode == 0, ro.stderr)
+        rd = run(cfg, vault, sources, ["capture", "delta", "--trailer", "Heal-mode:auto"],
+                 entry("delta", "Delta — a concept that belongs in the other sibling."))
+        check("t3 setup: boundary-move source concept captured in sibling A", rd.returncode == 0, rd.stderr)
+
+        FAM = [("Heal-verdict", "boundary-move"), ("Heal-mode", "ratified"), ("Heal-run", "selftest-t3")]
+        # move delta A->B: remove from test-topic, capture into other-topic — two stems, one branch
+        move = [
+            (cfg,       "remove",  "delta", None,                                                       FAM),
+            (other_cfg, "capture", "delta", entry("delta", "Delta — now living in the other sibling."), FAM),
+        ]
+        git(vault, "worktree", "add", "-q", "-b", "proposal/t3-boundary-1", wt, "main")
+        # interruption: only the cross-stem remove (sibling A) lands this pass
+        mv1 = apply_t3(vault, wt, sources, "main", "proposal/t3-boundary-1", move[:1])
+        check("t3 interrupted: only the remove (sibling A) applied", mv1 == ["test-topic: remove delta"], mv1)
+        # restart with the full move: the committed remove is skipped, the cross-stem capture runs
+        mv2 = apply_t3(vault, wt, sources, "main", "proposal/t3-boundary-1", move)
+        check("t3 restart resumes only the cross-stem capture (sibling B)",
+              mv2 == ["other-topic: capture delta"], mv2)
+        # a full re-run is a no-op — both stems' subjects are on the branch (stem-qualified skip)
+        mv3 = apply_t3(vault, wt, sources, "main", "proposal/t3-boundary-1", move)
+        check("t3 cross-stem composite re-runs to a no-op (stem-qualified skip)", mv3 == [], mv3)
+        nt = git(vault, "rev-list", "--count", "main..proposal/t3-boundary-1").stdout.strip()
+        check("t3 composite landed exactly 2 commits across two stems", nt == "2", "commits=%s" % nt)
+        check("t3: main untouched before merge (delta still in sibling A, absent from sibling B)",
+              git(vault, "cat-file", "-e", "main:test-topic/knowledge/delta.md").returncode == 0
+              and git(vault, "cat-file", "-e", "main:other-topic/knowledge/delta.md").returncode != 0)
+        # ratify: the --no-ff merge lands BOTH stems' changes on main
+        tm = git(vault, "merge", "-q", "--no-ff", "proposal/t3-boundary-1", "-m", "ratify: move delta A->B")
+        check("t3 cross-stem composite merges to main", tm.returncode == 0, tm.stderr)
+        check("t3 ratify: delta removed from sibling A on main",
+              git(vault, "cat-file", "-e", "main:test-topic/knowledge/delta.md").returncode != 0)
+        check("t3 ratify: delta present in sibling B on main",
+              git(vault, "cat-file", "-e", "main:other-topic/knowledge/delta.md").returncode == 0)
+        check("t3 ratify: sibling A INDEX dropped delta, sibling B INDEX gained it",
+              "knowledge/delta.md" not in git(vault, "show", "main:test-topic/INDEX.md").stdout
+              and "knowledge/delta.md" in git(vault, "show", "main:other-topic/INDEX.md").stdout)
+        git(vault, "worktree", "remove", "--force", wt)
+        git(vault, "branch", "-q", "-D", "proposal/t3-boundary-1")
+
+        # The boundary move above uses two DIFFERENT verbs (remove/capture), so its two subjects never
+        # share a bare `<verb> <slug>` — it does not actually exercise a cross-stem collision. This
+        # block does: capture the SAME slug into BOTH siblings under an interrupted restart. Under the
+        # bare key both are "capture shared" and pass 2 would WRONGLY skip sibling B (silently losing
+        # it); under the full stem-qualified subject they are distinct, so the restart resumes B. This
+        # is the discriminating test for the stem-qualified skip (a bare-key applier fails it).
+        COL = [("Heal-verdict", "add-sibling"), ("Heal-mode", "ratified"), ("Heal-run", "selftest-col")]
+        collide = [
+            (cfg,       "capture", "shared", entry("shared", "Shared — sibling A's take."), COL),
+            (other_cfg, "capture", "shared", entry("shared", "Shared — sibling B's take."), COL),
+        ]
+        git(vault, "worktree", "add", "-q", "-b", "proposal/t3-collide-1", wt, "main")
+        c1 = apply_t3(vault, wt, sources, "main", "proposal/t3-collide-1", collide[:1])
+        check("t3 collision: pass 1 lands only sibling A's capture", c1 == ["test-topic: capture shared"], c1)
+        c2 = apply_t3(vault, wt, sources, "main", "proposal/t3-collide-1", collide)
+        check("t3 collision: restart resumes sibling B's same-slug capture (NOT bare-key skipped)",
+              c2 == ["other-topic: capture shared"], c2)
+        check("t3 collision: both siblings hold their own 'shared' entry on the branch",
+              git(wt, "cat-file", "-e", "HEAD:test-topic/knowledge/shared.md").returncode == 0
+              and git(wt, "cat-file", "-e", "HEAD:other-topic/knowledge/shared.md").returncode == 0)
+        cc = git(vault, "rev-list", "--count", "main..proposal/t3-collide-1").stdout.strip()
+        check("t3 collision: exactly 2 commits (neither stem's capture dropped)", cc == "2", "commits=%s" % cc)
+        git(vault, "worktree", "remove", "--force", wt)
+        git(vault, "branch", "-q", "-D", "proposal/t3-collide-1")
     finally:
         shutil.rmtree(root, ignore_errors=True)
 

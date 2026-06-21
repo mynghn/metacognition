@@ -76,10 +76,26 @@ correct?", not "is it plausible?"). Every reviewer checks:
   search**. If any reviewer finds a qualifying live source, the degrade is wrong — REJECT it so the
   heal becomes a policy-fix (re-source) instead; the degrade stands only when the quorum also fails
   to find one.
+- **Family orthogonality (admission)** *(only for a T3 family proposal — `family-evolution.md`)* —
+  a family change (add / merge / retire a sibling, or move a boundary) reshapes the *family*
+  decomposition, and nothing mechanical checks a decomposition. So each reviewer **independently
+  re-runs the registry's admission test** on the proposed family — **coherent + closeable +
+  primary-sourced + non-overlapping**, with no new gap or overlap between the touched siblings — and
+  checks **registry ⇔ vault consistency** *over this proposal's delta and Status*: a row the proposal
+  marks **built** has matching captured entries + `config/<stem>`; a sibling it **retires** has its
+  `config/` gone, its row moved to *Excluded*/dropped, and only the engine's empty-skeleton folder
+  left; *planned / Excluded / Watch* rows are exempt (by design they have no folder). And — op-agnostic
+  — **both** the vault and the `@FAMILY_REPO@` proposal branches must have merged (a one-sided ratify,
+  e.g. a boundary-move whose pure-prose registry edit was skipped, is a REJECT). A built row with no entries, or captured entries under
+  no built row, is a half-formed change. The review unit here is the whole **cross-repo** diff — the
+  vault entry changes *and* the `@FAMILY@`/`config/` edit together. A family that isn't orthogonal, or
+  a registry that disagrees with the vault, is a REJECT.
 
 A reviewer votes **REJECT** if it finds any silent loss, scope drift, unsupported citation, or
 single-sourced load-bearing number; if (for a degraded candidate) it finds an at-or-above source the
-degrade missed; or if it cannot demonstrate the candidate correct on at least one load-bearing claim.
+degrade missed; if (for a T3 family proposal) the proposed family fails admission/orthogonality or
+the registry disagrees with the vault; or if it cannot demonstrate the candidate correct on at least
+one load-bearing claim.
 
 **Aggregate (default-REJECT): a majority-REJECT FAILS the candidate; only a majority accept clears
 it** (odd N + binary votes → there is never a tie). **One exception — the Degrade-justification find
