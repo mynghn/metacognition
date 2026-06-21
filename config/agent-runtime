@@ -2,3 +2,4 @@ stem = agent-runtime
 index_heading = Concepts
 env_prefix = AR
 tier = common
+volatility = 180
