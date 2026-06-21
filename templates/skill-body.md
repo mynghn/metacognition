@@ -13,8 +13,8 @@ The corpus is provider-neutral and shared; this skill is a thin entry point into
 
 Progressive disclosure — load the smallest relevant slice, never the whole corpus:
 
-1. Read `INDEX.md`. Each line is `- [<slug>](knowledge/<slug>.md) — <one-line trigger>`.
-2. Match the question against the trigger lines; pick the one entry (or few) that fit.
+1. Read `INDEX.md`. Each line is `- [<slug>](knowledge/<slug>.md) — <one-line trigger>`; a line prefixed `⚠ ` is **degraded** (a cited source fell below the authority bar — the entry is preserved but flagged for review).
+2. Match the question against the trigger lines; pick the one entry (or few) that fit. **Down-rank a `⚠` degraded entry** — prefer a healthy sibling, and treat a degraded entry's specifics with caution until it is healed.
 3. Read only those `knowledge/<slug>.md` file(s). Each entry is self-contained — you do not need its neighbours. Follow a `Related: [[other-slug]]` link only if the question genuinely needs it.
 
 Do not read the entire `knowledge/` directory. The INDEX exists so you load one entry, not all of them.

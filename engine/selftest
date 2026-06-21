@@ -13,6 +13,9 @@ Parity (vs the legacy `*-kb` scripts):
     allowlist (>=1 allowlisted source admits), fails loud on a missing policy, and the policy
     module parses hosts / matches *. patterns / flags an uncorroborated load-bearing number;
   - a missing INDEX heading rejects with no orphan entry; invalid slug rejects;
+  - a `degraded: <reason>` entry validates, is PRESERVED (marks, never deletes), and gets a
+    ⚠ down-rank prefix on its INDEX line that survives later upserts; an empty reason rejects;
+    explicit remove still drops a degraded entry's line cleanly (no orphan);
   - CRLF input is accepted and normalized (legacy file-round-trip parity);
   - remove drops the entry file and its INDEX line.
 
@@ -115,7 +118,10 @@ def index_lines(tdir):
 
 
 def entry_slugs(tdir):
-    return [l.split("[", 1)[1].split("]", 1)[0] for l in index_lines(tdir) if l.startswith("- [")]
+    # Match an entry line with OR without the `⚠ ` degraded prefix, so a degraded entry is
+    # still counted (it is listed, just down-ranked).
+    return [l.split("[", 1)[1].split("]", 1)[0]
+            for l in index_lines(tdir) if l.startswith("- ") and "](knowledge/" in l]
 
 
 def main():
@@ -302,6 +308,49 @@ def main():
                                    "sources:\n  - One — https://arxiv.org/abs/1\n  - Two — https://www.anthropic.com/x\n")
         check("corroboration clears with a 2nd distinct source", S.corroboration_flag(two_src) == [])
         check("a bare year is not a load-bearing number", "2025" not in S.load_bearing_numbers(num_body))
+
+        # degraded marker (quarantine): an entry marked `degraded: <reason>` validates, is
+        # PRESERVED (marks, never deletes), and its INDEX line carries a ⚠ down-rank prefix.
+        run(cfg, vault, ["capture", "decaying"], VALID_ENTRY.format(slug="decaying"))
+        check("healthy entry: no ⚠ in INDEX",
+              not any(l.startswith("- ⚠") and "decaying" in l for l in index_lines(tdir)))
+        degraded_body = VALID_ENTRY.format(slug="decaying").replace(
+            "last_refreshed: 2026-06-20", "last_refreshed: 2026-06-20\ndegraded: sole source went 404")
+        r = run(cfg, vault, ["refresh", "decaying"], degraded_body)
+        check("degraded entry validates + refreshes", r.returncode == 0, r.stderr)
+        check("degraded entry is PRESERVED (marks, not deletes)",
+              os.path.isfile(os.path.join(tdir, "knowledge", "decaying.md")))
+        deg_line = [l for l in index_lines(tdir) if "decaying" in l]
+        check("degraded INDEX line carries ⚠ down-rank prefix",
+              len(deg_line) == 1 and deg_line[0].startswith("- ⚠ ["), str(deg_line))
+        check("degraded entry still counted among entries", "decaying" in entry_slugs(tdir))
+
+        # a ⚠ line SURVIVES a later upsert of another slug (entry_re tolerates the marker —
+        # without that the degraded line would be dropped on the next write)
+        run(cfg, vault, ["capture", "zzz-after"], VALID_ENTRY.format(slug="zzz-after"))
+        deg_line2 = [l for l in index_lines(tdir) if "decaying" in l]
+        check("⚠ line survives a later unrelated upsert",
+              len(deg_line2) == 1 and deg_line2[0].startswith("- ⚠ ["), str(deg_line2))
+
+        # healing back (refresh with no degraded marker) clears the ⚠
+        run(cfg, vault, ["refresh", "decaying"], VALID_ENTRY.format(slug="decaying"))
+        healed = [l for l in index_lines(tdir) if "decaying" in l]
+        check("healed refresh clears the ⚠ marker", healed and not healed[0].startswith("- ⚠"), str(healed))
+
+        # an empty `degraded:` is rejected — a quarantine marker must carry a reason
+        empty_deg = VALID_ENTRY.format(slug="decaying").replace(
+            "last_refreshed: 2026-06-20", "last_refreshed: 2026-06-20\ndegraded:")
+        r = run(cfg, vault, ["refresh", "decaying"], empty_deg)
+        check("empty degraded reason rejected", r.returncode != 0 and "degraded" in r.stderr, r.stderr)
+
+        # explicit remove of a degraded entry drops its ⚠ INDEX line cleanly (no orphan). The
+        # engine's explicit remove still works; only AUTOMATIC removal on decay is disallowed
+        # (a skill-level rule, realized by the maintenance workflow, not an engine refusal).
+        run(cfg, vault, ["refresh", "decaying"], degraded_body)
+        r = run(cfg, vault, ["remove", "decaying"])
+        check("explicit remove of degraded entry exits 0", r.returncode == 0, r.stderr)
+        check("removed degraded entry: no orphan ⚠ INDEX line",
+              not any("decaying" in l for l in index_lines(tdir)))
 
         # locate resolves paths (incl. the vault)
         r = run(cfg, vault, ["locate", "alpha"])

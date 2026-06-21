@@ -231,7 +231,11 @@ def _frontmatter_fields(body):
 
 
 def _validate_frontmatter(body, slug):
-    """Validate frontmatter and return the description. Pure check — writes nothing."""
+    """Validate frontmatter; return (description, degraded-reason-or-None). Pure check — writes
+    nothing. `degraded` is an optional quarantine marker: absent on a healthy entry, a non-empty
+    reason when a source fell below the authority bar. A degraded entry is PRESERVED and
+    down-ranked, never deleted — knowledge leaves the vault only by an explicit ratified remove,
+    never as a silent side effect of decay."""
     fm, field = _frontmatter_fields(body)
     if field("name") != slug:
         die("frontmatter name %r != slug %r" % (field("name"), slug))
@@ -242,7 +246,10 @@ def _validate_frontmatter(body, slug):
         die("frontmatter 'last_refreshed' missing")
     if not re.search(r"(?m)^sources:", fm):
         die("frontmatter 'sources' missing")
-    return desc
+    degraded = field("degraded")
+    if re.search(r"(?m)^degraded:", fm) and not degraded:
+        die("frontmatter 'degraded' present but empty — give a reason or omit the key")
+    return desc, degraded
 
 
 def _index_path(tdir):
@@ -260,11 +267,16 @@ def _index_heading_pos(lines, cfg):
     die("INDEX.md missing %r section" % heading)
 
 
-def _upsert_index(idx, lines, h, slug, desc):
+def _upsert_index(idx, lines, h, slug, desc, degraded=None):
     """Upsert the entry's INDEX line, keeping the section slug-sorted (ported verbatim
-    from the `*-kb` python block)."""
-    line = "- [%s](knowledge/%s.md) — %s" % (slug, slug, desc.strip("\"'"))
-    entry_re = re.compile(r"^- \[([a-z0-9-]+)\]\(knowledge/\1\.md\) — ")
+    from the `*-kb` python block). A degraded entry gets a leading `⚠ ` so the retrieval layer
+    down-ranks it while the entry itself is preserved (knowledge is never silently lost).
+    entry_re tolerates that optional marker so an existing ⚠ line is still parsed, re-sorted, and
+    preserved across a later upsert of another slug — without it, a degraded line that follows
+    the first entry would be silently dropped on the next write."""
+    mark = "⚠ " if degraded else ""
+    line = "- %s[%s](knowledge/%s.md) — %s" % (mark, slug, slug, desc.strip("\"'"))
+    entry_re = re.compile(r"^- (?:⚠ )?\[([a-z0-9-]+)\]\(knowledge/\1\.md\) — ")
     # Keep pre-entry lines (section comment/blanks); collect entry lines for re-sorting.
     # NOTE: any non-entry line AFTER the first entry is intentionally dropped — exact parity
     # with the legacy `*-kb` upsert (the section is heading + boilerplate + entry list, no tail).
@@ -306,7 +318,7 @@ def write_entry(verb, vault, cfg, slug, provenance=None, sources_path=None):
     # op never leaves an orphan entry or half-written INDEX. The `*-kb`
     # scripts wrote the entry before checking the heading; pre-validating closes that gap
     # with no change on valid input.
-    desc = _validate_frontmatter(body, slug)
+    desc, degraded = _validate_frontmatter(body, slug)
     # Source-authority gate (part of the pre-write validation, so a rejected write is never
     # written dirty): a missing policy fails LOUD — the writer never silently skips the bar —
     # and an entry whose sole support is below the allowlist is refused, leaving any existing
@@ -326,7 +338,7 @@ def write_entry(verb, vault, cfg, slug, provenance=None, sources_path=None):
     os.makedirs(os.path.join(tdir, "knowledge"), exist_ok=True)
     with open(entry, "w", encoding="utf-8") as fh:
         fh.write(body)
-    _upsert_index(idx, lines, h, slug, desc)
+    _upsert_index(idx, lines, h, slug, desc, degraded)
     sha = commit_change(vault, cfg, slug, verb, provenance)
     past = verb + ("d" if verb.endswith("e") else "ed")  # capture->captured, refresh->refreshed
     sys.stdout.write("%s: %s %s (%s)\n" % (PROG, past, slug, sha))
@@ -340,7 +352,10 @@ def remove_entry(vault, cfg, slug, provenance=None):
     if not os.path.exists(entry):
         die("entry %r not found" % slug)
     idx = _index_path(tdir)
-    pat = re.compile(r"^- \[%s\]\(knowledge/%s\.md\) — " % (re.escape(slug), re.escape(slug)))
+    # Tolerate the optional `⚠ ` down-rank marker so removing a degraded entry drops its INDEX
+    # line too (no orphan). Engine `remove` is explicit/ratified — only AUTOMATIC removal of a
+    # degraded entry is disallowed, and that is a skill-level rule, not an engine refusal.
+    pat = re.compile(r"^- (?:⚠ )?\[%s\]\(knowledge/%s\.md\) — " % (re.escape(slug), re.escape(slug)))
     lines = open(idx, encoding="utf-8").read().split("\n")
     os.remove(entry)
     with open(idx, "w", encoding="utf-8") as fh:
