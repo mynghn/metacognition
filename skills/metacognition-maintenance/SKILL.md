@@ -14,7 +14,7 @@ It assumes the installer has resolved these absolute paths:
 
 - `@ENGINE_BIN@` — the `kb-engine` writer; a target in topic `<stem>` uses `--config @CONFIG_DIR@/<stem>`
 - `@CONFIG_DIR@` — per-sibling configs · `@VAULT@` — vault repo root · `@SOURCES@` — authority policy
-- `@HEALTH_CHECK@` — the deterministic decay detector
+- `@HEALTH_CHECK@` — the deterministic decay detector · `@NO_NET_LOSS@` — the no-net-loss diff (the verification floor)
 
 ## Two laws (never violated)
 
@@ -56,8 +56,14 @@ pass surfaces *candidates*, it never acts.
 3. **Research & reconcile** — gather current state-of-the-art *with citations* (web search, or a
    research skill if your provider has one) and reconcile in place: supersede stale claims in the
    one canonical entry, never append a competing view. Restamp `last_refreshed`; refresh `sources`.
-4. **Verify before writing** — run the verification envelope (citation re-fetch + no-net-loss
-   diff + adversarial quorum) on the reconciled result. It runs identically on both write paths.
+4. **Verify before writing** — run the verification envelope on the reconciled result. You (the
+   reconciler) run only the *mechanical* floor — the `@NO_NET_LOSS@` diff + citation resolve;
+   **every judgment verdict** (does a citation support its claim, is a flagged drop a real loss,
+   has scope drifted, is any claim refuted) is made by **independent reviewers that did NOT produce
+   the heal** — never self-check your own work. Default-REJECT; N odd (no tie); majority refute
+   fails. It runs identically on both write paths; a refute downgrades an auto change to a
+   proposal. See
+   **`references/verification.md`**.
 5. **Route through the gate and write** — mechanical + claim-preserving → auto-apply; claim-
    affecting / structural → a ratifiable proposal branch. See **`references/propose-on-branch.md`**
    for the gate, the worktree+branch proposal, ratify=merge / reject=delete, and the restartable
@@ -67,6 +73,8 @@ pass surfaces *candidates*, it never acts.
 
 - **`references/propose-on-branch.md`** — the write spine: gate, proposal worktree+branch,
   ratify/reject, restartable composite applier, provenance schema. **Read before any write.**
+- **`references/verification.md`** — the verification envelope: citation re-fetch, the
+  no-net-loss diff, and the default-REJECT adversarial quorum. **Read before any write.**
 
-> Tier-specific procedures (T1 heal, T2 sibling, T3 family) and the verification-envelope detail
-> are added as their references land; until then, follow the spine above and the two laws.
+> Tier-specific procedures (T1 heal, T2 sibling, T3 family) are added as their references land;
+> until then, follow the spine + envelope above and the two laws.

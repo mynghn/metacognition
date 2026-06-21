@@ -25,7 +25,7 @@ Classify the change, then route it (this realizes the auto-vs-propose split):
 
 When unsure, route to the proposal path — ratification is cheap, a wrong silent write is not.
 **Either path runs the full verification envelope before any write** (citation re-fetch, a
-no-net-loss diff, and an adversarial quorum);
+no-net-loss diff, and an adversarial quorum — see `verification.md`);
 auto-apply is *gated*, not unguarded. If the envelope's adversarial quorum refutes a change
 routed to auto, it is **downgraded to the proposal path**, never written silently.
 
