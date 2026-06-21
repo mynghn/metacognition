@@ -329,6 +329,12 @@ def main():
         check("host-less citation yields no host",
               S.source_hosts("---\nname: x\ndescription: d\nlast_refreshed: 2026-01-01\n"
                              "sources:\n  - Goodfellow et al., Deep Learning, MIT Press, 2016\n---\n\nB.\n") == [])
+        # a URL PATH filename is not a host: the whole /path is consumed, so `…/guide.pdf` never
+        # surfaces as a phantom `guide.pdf` host (which would be a false [sub-tier] lint flag)
+        check("URL path filename is not read as a host",
+              S.source_hosts("---\nname: x\ndescription: d\nlast_refreshed: 2026-01-01\n"
+                             "sources:\n  - G https://www.anthropic.com/x/a-practical-guide.pdf\n---\n\nB.\n")
+              == ["www.anthropic.com"])
         # an empty / comment-only hosts fence fails LOUD (reported not-found), not a silent reject-all
         empty_pol = os.path.join(pol_dir, "empty.md")
         with open(empty_pol, "w", encoding="utf-8") as fh:

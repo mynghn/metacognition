@@ -23,11 +23,16 @@ DEFAULT_SOURCES = os.path.join(
 # Citation hosts are read from BOTH schemed URLs and bare domain tokens. A `sources:` line is
 # free-text (`- <citation or url>`), and an LLM-rendered citation routinely drops the scheme
 # ("Author, sitename.com, 2026"). Reading only `https?://…` left a scheme-less sub-tier host
-# invisible to the gate — it was admitted clean, the exact defeat of the authority bar this code
-# exists to enforce. _SCHEMED_RE captures a URL's authority (userinfo/port stripped downstream);
-# _BARE_HOST_RE catches a bare domain, its lookbehind skipping an email local-part's `@domain`.
-_SCHEMED_RE = re.compile(r"(?i)\b[a-z][a-z0-9+.\-]*://([^/\s)\"'>\]]+)")
-_BARE_HOST_RE = re.compile(r"(?i)(?<![\w@.])((?:[a-z0-9](?:[a-z0-9\-]*[a-z0-9])?\.)+[a-z]{2,})\b")
+# invisible to the gate — admitted clean, the exact defeat of the authority bar this code exists
+# to enforce. One token regex matches a citation reference WHOLE: an optional scheme, the host
+# (group 1 = schemed authority, userinfo/port stripped downstream; group 2 = a bare domain), and
+# the trailing /path — the path is CONSUMED, not left behind, so a filename in it (`…/guide.pdf`)
+# can never be re-scanned and misread as a phantom host. The group-2 lookbehind skips an email
+# local-part's `@domain`.
+_HOST_TOKEN_RE = re.compile(
+    r"(?:[a-z][a-z0-9+.\-]*://([^/\s)\"'>\]]+)"
+    r"|(?<![\w@./])((?:[a-z0-9](?:[a-z0-9\-]*[a-z0-9])?\.)+[a-z]{2,})\b)"
+    r"(?:/[^\s)\"'>\]]*)?", re.I)
 
 
 def resolve_sources(explicit=None):
@@ -106,12 +111,8 @@ def source_hosts(body):
             seen.add(h)
             out.append(h)
 
-    for m in _SCHEMED_RE.finditer(block):
-        add(_authority_host(m.group(1)))
-    # Bare domains in what's left after removing schemed URLs, so a URL's userinfo/path can't
-    # re-surface a host that _authority_host already resolved away.
-    for m in _BARE_HOST_RE.finditer(_SCHEMED_RE.sub(" ", block)):
-        add(m.group(1))
+    for m in _HOST_TOKEN_RE.finditer(block):
+        add(_authority_host(m.group(1)) if m.group(1) is not None else m.group(2))
     return out
 
 
