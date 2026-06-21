@@ -9,6 +9,9 @@ Parity (vs the legacy `*-kb` scripts):
   - INDEX stays slug-sorted across out-of-order captures;
   - capture refuses an existing slug; refresh refuses an absent one; refresh overwrites;
   - every frontmatter rule rejects AND writes nothing (atomicity);
+  - the source-authority gate rejects a write whose sole support is below the SOURCES.md
+    allowlist (>=1 allowlisted source admits), fails loud on a missing policy, and the policy
+    module parses hosts / matches *. patterns / flags an uncorroborated load-bearing number;
   - a missing INDEX heading rejects with no orphan entry; invalid slug rejects;
   - CRLF input is accepted and normalized (legacy file-round-trip parity);
   - remove drops the entry file and its INDEX line.
@@ -52,6 +55,18 @@ Read this index first, then load only matching entries.
 
 <!-- one line per concept; appended by capture/refresh -->
 """
+
+# A permissive source policy for the parity/mutation tests, injected via $KB_SOURCES so every
+# existing capture/refresh clears the write-gate on VALID_ENTRY's example.com source. The gate's
+# own reject/admit behavior is exercised separately with explicit, restrictive --sources policies.
+SOURCES_PERMISSIVE = (
+    "# test policy\n"
+    "```hosts\n"
+    "example.com\n"
+    "arxiv.org\n"
+    "*.anthropic.com\n"
+    "```\n"
+)
 
 _checks = []
 
@@ -104,6 +119,11 @@ def entry_slugs(tdir):
 
 
 def main():
+    pol_dir = tempfile.mkdtemp(prefix="kb-sources-")
+    permissive = os.path.join(pol_dir, "SOURCES.md")
+    with open(permissive, "w", encoding="utf-8") as fh:
+        fh.write(SOURCES_PERMISSIVE)
+    os.environ["KB_SOURCES"] = permissive
     vault, tdir, cfg = make_vault()
     try:
         base = ncommits(vault)
@@ -234,6 +254,55 @@ def main():
         check("rejected provenance wrote no entry + no commit",
               not os.path.isfile(os.path.join(tdir, "knowledge", "badtrail.md")) and ncommits(vault) == n)
 
+        # source-authority gate: a write whose sole support is below the allowlist is rejected
+        # (never written dirty); >=1 allowlisted source admits. Authority (host vs allowlist) is
+        # the engine's deterministic half — citation resolve/support is the skill's envelope.
+        strict = os.path.join(pol_dir, "strict.md")
+        with open(strict, "w", encoding="utf-8") as fh:
+            fh.write("# strict\n```hosts\narxiv.org\n*.anthropic.com\n```\n")
+        n = ncommits(vault)
+        weak = VALID_ENTRY.format(slug="weak").replace("https://example.com", "https://random-blog.example.net")
+        r = run(cfg, vault, ["capture", "weak", "--sources", strict], weak)
+        check("sub-allowlist sole source rejected", r.returncode != 0 and "source authority" in r.stderr, r.stderr)
+        check("gate-rejected write: no entry, no commit",
+              not os.path.isfile(os.path.join(tdir, "knowledge", "weak.md")) and ncommits(vault) == n)
+        strong = VALID_ENTRY.format(slug="strong").replace("https://example.com", "https://arxiv.org/abs/2401.00001")
+        r = run(cfg, vault, ["capture", "strong", "--sources", strict], strong)
+        check("allowlisted source admitted", r.returncode == 0, r.stderr)
+        mixed = VALID_ENTRY.format(slug="mixed").replace(
+            "https://example.com\n",
+            "https://random-blog.example.net\n  - Paper — https://arxiv.org/abs/2401.00002\n")
+        r = run(cfg, vault, ["capture", "mixed", "--sources", strict], mixed)
+        check("mixed sources admitted when >=1 clears the bar", r.returncode == 0, r.stderr)
+
+        # a missing / empty policy fails LOUD — the writer never silently skips the authority bar
+        r = run(cfg, vault, ["capture", "nopol", "--sources", os.path.join(pol_dir, "absent.md")],
+                VALID_ENTRY.format(slug="nopol"))
+        check("missing source policy fails loud (no silent skip)",
+              r.returncode != 0 and "source policy not found" in r.stderr, r.stderr)
+
+        # SOURCES.md policy module (unit): the parser the write-gate AND the health-check
+        # source-lint both consume — one parser, so their bars can never drift.
+        sys.path.insert(0, os.path.dirname(ENGINE))
+        import sources as S
+        pats, found = S.load_allowlist(strict)
+        check("hosts block parses", found and "arxiv.org" in pats and "*.anthropic.com" in pats, str(pats))
+        check("apex host matches bare pattern", S.host_allowed("arxiv.org", pats))
+        check("subdomain matches *. pattern", S.host_allowed("docs.anthropic.com", pats))
+        check("apex matches *. pattern", S.host_allowed("anthropic.com", pats))
+        check("non-allowlisted host rejected", not S.host_allowed("evil.example.net", pats))
+        check("absent policy reports found=False (caller fails loud, not empty-allows)",
+              S.load_allowlist(os.path.join(pol_dir, "absent.md"))[1] is False)
+        num_body = ("---\nname: x\ndescription: d\nlast_refreshed: 2026-01-01\n"
+                    "sources:\n  - One — https://arxiv.org/abs/1\n---\n\n"
+                    "A benchmark of 194,480 calls hit 90% accuracy in 2025.\n")
+        check("corroboration flags a load-bearing number on a single source",
+              "194,480" in S.corroboration_flag(num_body), str(S.corroboration_flag(num_body)))
+        two_src = num_body.replace("sources:\n  - One — https://arxiv.org/abs/1\n",
+                                   "sources:\n  - One — https://arxiv.org/abs/1\n  - Two — https://www.anthropic.com/x\n")
+        check("corroboration clears with a 2nd distinct source", S.corroboration_flag(two_src) == [])
+        check("a bare year is not a load-bearing number", "2025" not in S.load_bearing_numbers(num_body))
+
         # locate resolves paths (incl. the vault)
         r = run(cfg, vault, ["locate", "alpha"])
         check("locate exits 0", r.returncode == 0, r.stderr)
@@ -357,6 +426,7 @@ def main():
             shutil.rmtree(v3, ignore_errors=True)
     finally:
         shutil.rmtree(vault, ignore_errors=True)
+        shutil.rmtree(pol_dir, ignore_errors=True)
 
     passed = sum(1 for _, ok, _ in _checks if ok)
     total = len(_checks)

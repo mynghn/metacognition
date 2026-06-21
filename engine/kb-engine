@@ -32,6 +32,9 @@ import re
 import subprocess
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import sources  # engine-local module: the SOURCES.md authority-policy logic (shared with health-check)
+
 PROG = "kb-engine"
 
 
@@ -281,7 +284,7 @@ def _upsert_index(idx, lines, h, slug, desc):
         fh.write("\n".join(out))
 
 
-def write_entry(verb, vault, cfg, slug, provenance=None):
+def write_entry(verb, vault, cfg, slug, provenance=None, sources_path=None):
     valid_slug(slug)
     _require_git_repo(vault)
     tdir = topic_dir(vault, cfg)
@@ -304,6 +307,18 @@ def write_entry(verb, vault, cfg, slug, provenance=None):
     # scripts wrote the entry before checking the heading; pre-validating closes that gap
     # with no change on valid input.
     desc = _validate_frontmatter(body, slug)
+    # Source-authority gate (part of the pre-write validation, so a rejected write is never
+    # written dirty): a missing policy fails LOUD — the writer never silently skips the bar —
+    # and an entry whose sole support is below the allowlist is refused, leaving any existing
+    # entry untouched. Citation RESOLVE + SUPPORT (network + judgment) is the skill's envelope,
+    # not this deterministic host check.
+    patterns, found = sources.load_allowlist(sources_path)
+    if not found:
+        die("source policy not found or empty: %s — cannot enforce source authority "
+            "(pass --sources or restore SOURCES.md)" % sources_path)
+    violation = sources.authority_violation(body, patterns)
+    if violation:
+        die("source authority: %s" % violation)
     idx = _index_path(tdir)
     lines = open(idx, encoding="utf-8").read().split("\n")
     h = _index_heading_pos(lines, cfg)
@@ -352,10 +367,12 @@ def main(argv=None):
     sub = p.add_subparsers(dest="op", required=True)
     trailer_help = ("structured git-trailer provenance (repeatable), e.g. "
                     "--trailer Heal-mode:auto — appended to the commit for audit")
+    sources_help = "source-authority policy file (default: SOURCES.md at the engine repo root)"
     for op in ("capture", "refresh"):
         s = sub.add_parser(op, help="%s an entry (markdown on stdin)" % op)
         s.add_argument("slug")
         s.add_argument("--trailer", action="append", metavar="KEY:VALUE", help=trailer_help)
+        s.add_argument("--sources", metavar="FILE", help=sources_help)
     s = sub.add_parser("remove", help="remove an entry")
     s.add_argument("slug")
     s.add_argument("--trailer", action="append", metavar="KEY:VALUE", help=trailer_help)
@@ -366,7 +383,8 @@ def main(argv=None):
     cfg = load_config(args.config)
     vault = resolve_vault(args.vault, cfg)
     if args.op in ("capture", "refresh"):
-        write_entry(args.op, vault, cfg, args.slug, parse_trailers(args.trailer))
+        write_entry(args.op, vault, cfg, args.slug, parse_trailers(args.trailer),
+                    sources.resolve_sources(args.sources))
     elif args.op == "remove":
         remove_entry(vault, cfg, args.slug, parse_trailers(args.trailer))
     elif args.op == "locate":
