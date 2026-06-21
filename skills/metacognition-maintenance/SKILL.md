@@ -1,0 +1,72 @@
+---
+name: metacognition-maintenance
+description: Heal and evolve the Metacognition knowledge vault on demand — reconcile a decayed entry against current sources (T1), re-derive a sibling's entry-set (T2), or evolve the family (T3), routing each change through gated auto-apply or a ratifiable proposal branch. Use when asked to maintain, heal, verify-and-refresh, or evolve the vault, or to act on a health-check worklist. Drives kb-engine as the sole writer (never edits vault files directly) and runs only on explicit request, never on a schedule.
+---
+
+# Metacognition vault maintenance
+
+Heal and evolve the shared knowledge vault. This skill is **provider-neutral** — it drives only
+the `kb-engine` / `health-check` CLIs and `git`, and any sub-agent step ("spawn N independent
+reviewers") is phrased so Claude, Codex, or any agent realizes it with its own mechanism. The
+same skill ships byte-identical to every provider.
+
+It assumes the installer has resolved these absolute paths:
+
+- `@ENGINE_BIN@` — the `kb-engine` writer; a target in topic `<stem>` uses `--config @CONFIG_DIR@/<stem>`
+- `@CONFIG_DIR@` — per-sibling configs · `@VAULT@` — vault repo root · `@SOURCES@` — authority policy
+- `@HEALTH_CHECK@` — the deterministic decay detector
+
+## Two laws (never violated)
+
+1. **The engine is the sole writer of vault entries.** Read vault files freely to decide *what* to
+   change, but **never hand-edit a knowledge entry or its INDEX**. Every entry write — capture,
+   refresh, remove — is a `kb-engine` commit, so it is validated, source-gated, and recorded as one
+   recoverable commit in the vault's history. (Family-level policy/registry files — `FAMILY.md`,
+   `SOURCES.md` — are engine-repo artifacts, not vault content, and fall outside this rule; they
+   evolve through their own ratify path, handled by the family/policy tiers.)
+2. **Only authoritative sources, or quarantine.** Every write is gated against `@SOURCES@`. If a
+   reconciliation's sole support falls below the bar and no at-or-above replacement is found, do
+   **not** write it dirty and do **not** delete the entry — `refresh` it *with* a
+   `degraded: <reason>` frontmatter marker (the engine down-ranks it `⚠` in the INDEX) and leave
+   it for human review. Knowledge leaves the vault only by an explicit ratified `remove`.
+
+## When this runs
+
+Only on explicit demand — the maintainer triggers a heal/evolution, or hands you a worklist.
+**Nothing here runs on a schedule or on its own.** Detection is separate and read-only: a health
+pass surfaces *candidates*, it never acts.
+
+```sh
+@HEALTH_CHECK@        # → worklist: `<stem>/<slug>: [dead-link <url>] [over-age <n>d] [sub-tier <host>]`
+```
+
+## A maintenance run
+
+1. **Scope the targets** — from the maintainer's request, or from a health-pass worklist (a
+   `[dead-link]` / `[over-age]` / `[sub-tier]` line names an entry to heal).
+2. **Classify the tier**:
+   - **T1 — heal** one entry: reconcile it in place against current sources.
+   - **T2 — sibling evolution**: re-derive the *whole* sibling, emitting a keep/refresh/split/
+     merge/retire/re-scope diff. Never a blind single-entry insert.
+   - **T3 — family evolution**: add/merge/retire a sibling or move a boundary, with the
+     `FAMILY.md` registry edit.
+
+   T2/T3 always re-derive the whole sibling/family before emitting any op (the holistic check) —
+   there is no single-entry insert path.
+3. **Research & reconcile** — gather current state-of-the-art *with citations* (web search, or a
+   research skill if your provider has one) and reconcile in place: supersede stale claims in the
+   one canonical entry, never append a competing view. Restamp `last_refreshed`; refresh `sources`.
+4. **Verify before writing** — run the verification envelope (citation re-fetch + no-net-loss
+   diff + adversarial quorum) on the reconciled result. It runs identically on both write paths.
+5. **Route through the gate and write** — mechanical + claim-preserving → auto-apply; claim-
+   affecting / structural → a ratifiable proposal branch. See **`references/propose-on-branch.md`**
+   for the gate, the worktree+branch proposal, ratify=merge / reject=delete, and the restartable
+   composite-op applier. Every commit carries `Heal-*` provenance trailers (schema in that file).
+
+## References (load on demand)
+
+- **`references/propose-on-branch.md`** — the write spine: gate, proposal worktree+branch,
+  ratify/reject, restartable composite applier, provenance schema. **Read before any write.**
+
+> Tier-specific procedures (T1 heal, T2 sibling, T3 family) and the verification-envelope detail
+> are added as their references land; until then, follow the spine above and the two laws.
