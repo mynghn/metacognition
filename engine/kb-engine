@@ -369,12 +369,21 @@ def write_entry(verb, vault, cfg, slug, provenance=None, sources_path=None):
     # and an entry whose sole support is below the allowlist is refused, leaving any existing
     # entry untouched. Citation RESOLVE + SUPPORT (network + judgment) is the skill's envelope,
     # not this deterministic host check.
+    #
+    # EXCEPTION — quarantine: a write carrying a `degraded:` marker is admitted even when its sole
+    # support is below the bar. The marker is the explicit, recorded acknowledgement that the source
+    # is sub-par — the entry is down-ranked (⚠) for review, not passed off as authoritative — so it
+    # is the opposite of a silent "dirty" write. Without this, an entry whose
+    # only source decayed below the bar could be neither healed in place nor even marked degraded
+    # (the marking is itself a write the gate would block), so the knowledge could only be lost —
+    # the exact silent loss the quarantine marker exists to prevent. A NON-degraded sub-bar write is
+    # still refused; the marker is the one deliberate way past the bar.
     patterns, found = sources.load_allowlist(sources_path)
     if not found:
         die("source policy not found or empty: %s — cannot enforce source authority "
             "(pass --sources or restore SOURCES.md)" % sources_path)
     violation = sources.authority_violation(body, patterns)
-    if violation:
+    if violation and not degraded:
         die("source authority: %s" % violation)
     idx = _index_path(tdir)
     lines = open(idx, encoding="utf-8").read().split("\n")

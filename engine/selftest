@@ -17,7 +17,9 @@ Parity (vs the legacy `*-kb` scripts):
   - a missing INDEX heading rejects with no orphan entry; invalid slug rejects;
   - a `degraded: <reason>` entry validates, is PRESERVED (marks, never deletes), and gets a
     ⚠ down-rank prefix on its INDEX line that survives later upserts; an empty reason rejects;
-    explicit remove still drops a degraded entry's line cleanly (no orphan);
+    explicit remove still drops a degraded entry's line cleanly (no orphan); a sub-allowlist
+    sole-support write carrying the marker is ADMITTED (quarantine), where the same write without
+    it is refused;
   - CRLF input is accepted and normalized (legacy file-round-trip parity);
   - remove drops the entry file and its INDEX line.
 
@@ -301,6 +303,22 @@ def main():
             "https://random-blog.example.net\n  - Paper — https://arxiv.org/abs/2401.00002\n")
         r = run(cfg, vault, ["capture", "mixed", "--sources", strict], mixed)
         check("mixed sources admitted when >=1 clears the bar", r.returncode == 0, r.stderr)
+
+        # quarantine exemption: the SAME kind of sub-allowlist sole-support write that `weak`
+        # rejected above is ADMITTED when it carries a `degraded:` marker — the marker turns a
+        # rejected "dirty" write into a down-ranked, review-flagged one, so an entry whose only
+        # source decayed below the bar can be preserved (marked) rather than lost. The marker is the
+        # one deliberate way past the bar; without it (cf. `weak`) the write is still refused.
+        quarantined = VALID_ENTRY.format(slug="quarantined").replace(
+            "https://example.com", "https://random-blog.example.net").replace(
+            "last_refreshed: 2026-06-20",
+            "last_refreshed: 2026-06-20\ndegraded: sole source fell below the bar; no replacement found")
+        r = run(cfg, vault, ["capture", "quarantined", "--sources", strict], quarantined)
+        check("sub-allowlist sole source ADMITTED when marked degraded (quarantine)", r.returncode == 0, r.stderr)
+        idx_txt = "\n".join(index_lines(tdir))
+        check("quarantined entry written + down-ranked (⚠ in INDEX)",
+              os.path.isfile(os.path.join(tdir, "knowledge", "quarantined.md")) and "⚠ [quarantined]" in idx_txt,
+              idx_txt[:200])
 
         # a missing / empty policy fails LOUD — the writer never silently skips the authority bar
         r = run(cfg, vault, ["capture", "nopol", "--sources", os.path.join(pol_dir, "absent.md")],
