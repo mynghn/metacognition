@@ -4,15 +4,18 @@
 Emits a worklist of entries flagged by three JUDGMENT-FREE mechanical signals; it writes
 NOTHING to the vault and calls NO model, so detection never enters the expensive research path
 and never gates normal vault operations — it runs out-of-band, on its own invocation:
-  1. reachability — HEAD each cited URL (GET-retry on a HEAD-hostile 403/405/429); a
-     non-resolving reference is [dead-link].
+  1. reachability — HEAD each cited URL (GET-retry on a HEAD-hostile 403/405/429). A genuinely
+     non-resolving reference (404/410, or no connection at all) is [dead-link]; a host that merely
+     REFUSES the automated check — a persistent 403/405/429 even after the GET-retry — is
+     [unverifiable], NOT [dead-link] (a refused bot is not proof the page is gone; bot-hostile hosts
+     like medium/openai/ragas live here, so a human should eyeball it rather than treat it as decay).
   2. age x volatility — (today - last_refreshed) vs the topic's `volatility` (days) from
      config/<stem>; past the threshold is [over-age].
   3. source-lint — each citation host vs the SOURCES.md allowlist; a sub-allowlist host is
      [sub-tier]. Shares engine/sources.py with the write-gate, so the bar detection flags
      against is byte-identical to the bar a write must clear — they can never drift.
 
-Output: one line per flagged entry, `<stem>/<slug>: [dead-link <url>] [over-age <days>d] [sub-tier <host>]`.
+Output: one line per flagged entry, `<stem>/<slug>: [dead-link <url>] [unverifiable <url>] [over-age <days>d] [sub-tier <host>]`.
 A clean entry produces no line. The vault is read-only throughout (no git, no file writes).
 """
 import argparse
@@ -94,16 +97,24 @@ def _status(url, method, timeout):
         return None  # connection refused, DNS failure, timeout, malformed URL → unreachable
 
 
-def url_dead(url, timeout):
-    """True if the URL does not resolve to a 2xx/3xx. HEAD first; GET-retry on a HEAD-hostile
-    403/405/429 or an outright HEAD failure, because some hosts refuse HEAD entirely — the exact
-    transient false positives the cost sweep saw (Medium 403, ragas 429) are retried, not flagged."""
+def url_reachability(url, timeout):
+    """Classify a citation URL: 'ok' (resolves 2xx/3xx), 'unverifiable' (a bot-hostile host that
+    REFUSES the automated check — a persistent 403/405/429 even after the GET-retry: a refused bot is
+    not proof the page is gone), or 'dead' (genuinely unreachable — 404/410/other non-2xx/3xx, or no
+    connection at all). HEAD first; GET-retry on a HEAD-hostile 403/405/429 or a HEAD failure, since
+    some hosts refuse HEAD entirely. The 403/405/429 false positives the cost sweep saw (Medium,
+    ragas, openai) now surface as [unverifiable], not [dead-link] — a human verifies, not a heal."""
     s = _status(url, "HEAD", timeout)
     if s is None or s in (403, 405, 429):
-        s = _status(url, "GET", timeout)
-        if s is None:
-            return True
-    return not (200 <= s < 400)
+        g = _status(url, "GET", timeout)
+        if g is not None:
+            s = g  # a real GET response supersedes a HEAD failure / HEAD-hostile status
+    if s is None:
+        return "dead"          # no response at all (DNS / refused / timeout) → genuinely unreachable
+    if s in (403, 405, 429):
+        return "unverifiable"  # host answered with a refusal the GET-retry didn't override with a
+                               # resolving/gone status — reachable (it responded), not proven gone
+    return "ok" if 200 <= s < 400 else "dead"
 
 
 def entry_urls(body):
@@ -179,20 +190,21 @@ def main(argv=None):
 
     # Reachability: HEAD each UNIQUE url once, in parallel (224 citations dedupe to ~114 urls),
     # then map verdicts back to entries. One sweep, never per-entry refetch.
-    dead = {}
+    reach = {}
     if not args.offline:
         urls = sorted({u for _, _, body, _ in entries for u in entry_urls(body)})
         if urls:
             with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.workers)) as ex:
-                for u, isdead in zip(urls, ex.map(lambda x: url_dead(x, args.timeout), urls)):
-                    dead[u] = isdead
+                for u, st in zip(urls, ex.map(lambda x: url_reachability(x, args.timeout), urls)):
+                    reach[u] = st
 
     flagged = 0
     for stem, slug, body, vol in entries:
         fm, _ = sources.split_frontmatter(body)
         tags = []
         if not args.offline:
-            tags += ["[dead-link %s]" % u for u in entry_urls(body) if dead.get(u)]
+            tags += ["[dead-link %s]" % u for u in entry_urls(body) if reach.get(u) == "dead"]
+            tags += ["[unverifiable %s]" % u for u in entry_urls(body) if reach.get(u) == "unverifiable"]
         over = over_age_days(_field(fm, "last_refreshed"), vol, today)
         if over is not None:
             tags.append("[over-age %dd]" % over)

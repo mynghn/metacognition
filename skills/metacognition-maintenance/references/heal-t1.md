@@ -14,9 +14,9 @@ authoritative for the mechanics.
 ## From signal to heal
 
 T1 starts from a target: a maintainer names an entry, or a `@HEALTH_CHECK@` worklist line does
-(`<stem>/<slug>: [dead-link <url>] [over-age <days>d] [sub-tier <host>]`). Each tag names *one*
-flagged thing and says *why* the entry surfaced — but a tag is a **lint, not a verdict**: the route
-depends on what reconciliation finds, not on the tag alone.
+(`<stem>/<slug>: [dead-link <url>] [unverifiable <url>] [over-age <days>d] [sub-tier <host>]`). Each
+tag names *one* flagged thing and says *why* the entry surfaced — but a tag is a **lint, not a
+verdict**: the route depends on what reconciliation finds, not on the tag alone.
 
 - **`[dead-link <url>]`** — one cited reference no longer resolves. Replace it with an equivalent
   **live** source backing the *same* claim → a mechanical swap (auto). A dead link beside a surviving
@@ -24,6 +24,14 @@ depends on what reconciliation finds, not on the tag alone.
   claim's **only** live at-or-above backing and no replacement is found, the claim is left with no live
   authoritative support → **quarantine** (see the trigger note below — the engine gate will *not* catch
   this case for you).
+- **`[unverifiable <url>]`** — the host **refused the automated check** (a persistent 403/405/429 even
+  on a GET-retry), which is **not** proof the page is gone — bot-hostile hosts (Medium, OpenAI, ragas,
+  …) live here. **Not decay, and usually not a heal:** verify the link by hand; if it resolves for a
+  human, leave it (no write — the flag was a reachability limit, not a defect). Only if a hand-check
+  confirms it is *genuinely* gone does it become a `[dead-link]` (swap / drop / quarantine, above). Do
+  **not** auto-swap an `[unverifiable]` cite on the worklist's word alone. (An `[unverifiable]` never
+  earns its own `Heal-verdict` — a hand-check either no-ops, so no write, or downgrades it to
+  `[dead-link]`, whose verdict applies.)
 - **`[over-age <days>d]`** — past the topic's freshness threshold; the *content* may be unchanged.
   Re-verify against current SOTA. Unchanged → restamp `last_refreshed` only (mechanical → auto). A
   claim moved → a claim-change (proposal). The decay is **structural** (the topic has split, the entry

@@ -3,8 +3,9 @@
 
 Each test pins a behavior health-check must preserve (run after any change):
   - reachability flags a 404 and a connection-refused URL as [dead-link], but NOT a 200 nor a
-    HEAD-hostile 405-then-GET-200 (the GET-retry); a localhost server makes this deterministic
-    with no external network;
+    HEAD-hostile 405-then-GET-200 (the GET-retry); a host that REFUSES the bot persistently
+    (403/429 on HEAD AND GET) is [unverifiable], NOT [dead-link] (a refused bot is not proof the
+    page is gone); a localhost server makes this deterministic with no external network;
   - age x volatility flags an entry past its topic's threshold as [over-age <n>d] (via --today);
   - source-lint flags a sub-allowlist host as [sub-tier], and never a URL path filename;
   - a clean entry produces no worklist line;
@@ -32,16 +33,17 @@ def check(name, ok, detail=""):
 
 class _Handler(http.server.BaseHTTPRequestHandler):
     """200 on /ok and (GET-only) /headhostile; 405 on HEAD /headhostile to force a GET-retry;
-    404 elsewhere."""
+    /botblocked refuses persistently (403 on HEAD AND GET) and /ratelimited likewise (429) — the
+    bot-hostile case that must be [unverifiable], not [dead-link]; 404 elsewhere."""
     def _r(self, code):
         self.send_response(code)
         self.end_headers()
 
     def do_HEAD(self):
-        self._r({"/ok": 200, "/headhostile": 405}.get(self.path, 404))
+        self._r({"/ok": 200, "/headhostile": 405, "/botblocked": 403, "/ratelimited": 429}.get(self.path, 404))
 
     def do_GET(self):
-        self._r(200 if self.path in ("/ok", "/headhostile") else 404)
+        self._r({"/ok": 200, "/headhostile": 200, "/botblocked": 403, "/ratelimited": 429}.get(self.path, 404))
 
     def log_message(self, *a):
         pass
@@ -90,6 +92,7 @@ def main():
         write_entry(kdir, "dead", "2026-06-20", [base + "/ok", base + "/missing"])
         write_entry(kdir, "refused", "2026-06-20", ["http://127.0.0.1:1/x", base + "/ok"])
         write_entry(kdir, "headhostile", "2026-06-20", [base + "/headhostile"])
+        write_entry(kdir, "unverifiable", "2026-06-20", [base + "/botblocked", base + "/ratelimited"])
         write_entry(kdir, "old", "2026-01-01", [base + "/ok"])
         # a sub-tier host on a never-resolving `.invalid` domain (RFC 2606): sub-tier AND dead,
         # both deterministic with no external server; its /path filename must NOT become a host.
@@ -116,6 +119,10 @@ def main():
               "[dead-link http://127.0.0.1:1/x]" in lines.get("test-topic/refused", ""), lines.get("test-topic/refused"))
         check("HEAD-hostile (405 -> GET 200) NOT flagged dead (GET-retry)",
               "test-topic/headhostile" not in lines, lines.get("test-topic/headhostile"))
+        ul = lines.get("test-topic/unverifiable", "")
+        check("persistent 403/429 (HEAD AND GET) flagged [unverifiable], NOT [dead-link]",
+              "[unverifiable %s/botblocked]" % base in ul and "[unverifiable %s/ratelimited]" % base in ul
+              and "[dead-link" not in ul, ul)
         check("over-age entry flagged", "over-age" in lines.get("test-topic/old", ""), lines.get("test-topic/old"))
         exp_over = (datetime.date(2026, 6, 21) - datetime.date(2026, 1, 1)).days - 30
         check("over-age days computed (age - volatility)",
@@ -132,7 +139,9 @@ def main():
         r2 = run_hc(common + ["--offline"])
         off = by_entry(r2.stdout)
         check("offline: no dead-link tags anywhere", "dead-link" not in r2.stdout, r2.stdout)
+        check("offline: no unverifiable tags either (also a reachability signal)", "unverifiable" not in r2.stdout, r2.stdout)
         check("offline: a dead-only entry is no longer flagged", "test-topic/refused" not in off, off.get("test-topic/refused"))
+        check("offline: an unverifiable-only entry is no longer flagged", "test-topic/unverifiable" not in off, off.get("test-topic/unverifiable"))
         check("offline: age still flagged", "over-age" in off.get("test-topic/old", ""), off.get("test-topic/old"))
         check("offline: sub-tier still flagged", "[sub-tier blog.invalid]" in off.get("test-topic/subtier", ""), off.get("test-topic/subtier"))
 

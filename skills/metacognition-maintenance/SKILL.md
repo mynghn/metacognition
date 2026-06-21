@@ -40,13 +40,14 @@ Only on explicit demand — the maintainer triggers a heal/evolution, or hands y
 pass surfaces *candidates*, it never acts.
 
 ```sh
-@HEALTH_CHECK@        # → worklist: `<stem>/<slug>: [dead-link <url>] [over-age <n>d] [sub-tier <host>]`
+@HEALTH_CHECK@        # → worklist: `<stem>/<slug>: [dead-link <url>] [unverifiable <url>] [over-age <n>d] [sub-tier <host>]`
 ```
 
 ## A maintenance run
 
 1. **Scope the targets** — from the maintainer's request, or from a health-pass worklist (a
-   `[dead-link]` / `[over-age]` / `[sub-tier]` line names an entry to heal).
+   `[dead-link]` / `[unverifiable]` / `[over-age]` / `[sub-tier]` line names an entry to heal; an
+   `[unverifiable]` is a bot-refused host, not decay — verify it by hand, see `references/heal-t1.md`).
 2. **Classify the tier**:
    - **T1 — heal** one entry: reconcile it in place against current sources, routing the result
      auto / proposal / quarantine. See **`references/heal-t1.md`**.
