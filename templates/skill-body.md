@@ -30,10 +30,10 @@ When a reusable @TOPIC@ insight is worth keeping:
    @ENGINE@ capture <slug> <<'EOF'
    ---
    name: <slug>
-   description: <one line — a retrieval trigger: "load when…">
+   description: "<one line retrieval trigger — load when…>"
    last_refreshed: <YYYY-MM-DD>
    sources:
-     - <citation or url>
+     - "<citation or url>"
    ---
 
    <distilled, self-contained explanation — usable without any other entry>
@@ -42,7 +42,9 @@ When a reusable @TOPIC@ insight is worth keeping:
    EOF
    ```
 
-3. The engine validates the frontmatter (it refuses an entry with no `sources` or `last_refreshed`), writes the entry into the vault, upserts the INDEX line, and records one commit. The entry is now retrievable by the steps above.
+   **Quote the `description` and every `sources` value in double quotes.** Citation titles and triggers routinely contain a colon-space (`SoK: …`, `load when: …`); left unquoted, YAML misreads the value — a hard parse error on `description` (GitHub won't render the frontmatter) or a silently mis-parsed `sources` item. The engine rejects an unquoted colon-space, so quoting up front avoids a bounced capture.
+
+3. The engine validates the frontmatter (it refuses an entry with no `sources` or `last_refreshed`, and rejects frontmatter that isn't valid YAML), writes the entry into the vault, upserts the INDEX line, and records one commit. The entry is now retrievable by the steps above.
 
 A good entry is distilled (not a transcript), self-contained, grounded in ≥1 authoritative source, and dated.
 

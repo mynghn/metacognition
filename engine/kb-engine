@@ -230,6 +230,50 @@ def _frontmatter_fields(body):
     return fm, field
 
 
+def _unsafe_scalar(value):
+    """True if `value`, as authored, would NOT round-trip as a plain YAML string — the
+    colon-space / trailing-colon / unbalanced-leading-quote family that silently breaks
+    GitHub frontmatter rendering (a hard "mapping values are not allowed" parse error) or
+    mis-parses a `sources` item into a {key: value} mapping. Dependency-free by design: a
+    real YAML parser would be exact, but the engine is stdlib-only, so this targets the
+    observed failure family; the vault's CI runs full Psych as the comprehensive backstop."""
+    v = value.strip()
+    if not v:
+        return False
+    if v[0] in ("\"", "'"):
+        # Authored as a quoted scalar: trust it only if the same quote closes the line.
+        return not (len(v) >= 2 and v[-1] == v[0])
+    return (": " in v) or v.endswith(":") or (" #" in v)
+
+
+def _check_frontmatter_yaml(fm):
+    """Reject frontmatter whose scalar values won't parse as plain YAML strings, BEFORE the
+    engine writes the body verbatim. The regex field-reader above is lenient — it happily
+    accepts an unquoted `description`/`sources` value with a colon-space that GitHub then
+    fails to render (or silently mis-parses into a mapping). The fix is always the same:
+    wrap the value in double quotes."""
+    in_sources = False
+    for ln in fm.split("\n"):
+        top = re.match(r"^([A-Za-z_][\w-]*):[ \t]?(.*)$", ln)
+        if top and ln[:1] not in (" ", "\t"):
+            key, val = top.group(1), top.group(2).rstrip()
+            in_sources = key == "sources"
+            if val and _unsafe_scalar(val):
+                die("frontmatter %r is not valid YAML — a colon-space, trailing colon, or "
+                    "unbalanced quote makes the parser misread it; wrap the value in double "
+                    "quotes: %s" % (key, val))
+        elif in_sources:
+            seq = re.match(r"^[ \t]+-[ \t]+(.*)$", ln)
+            if seq:
+                item = seq.group(1).rstrip()
+                if _unsafe_scalar(item):
+                    die("frontmatter 'sources' item is not valid YAML — a colon-space or "
+                        "unbalanced quote silently mis-parses the citation into a mapping; "
+                        "wrap it in double quotes: %s" % item)
+            elif ln.strip():
+                in_sources = False
+
+
 def _validate_frontmatter(body, slug):
     """Validate frontmatter; return (description, degraded-reason-or-None). Pure check — writes
     nothing. `degraded` is an optional quarantine marker: absent on a healthy entry, a non-empty
@@ -237,6 +281,7 @@ def _validate_frontmatter(body, slug):
     down-ranked, never deleted — knowledge leaves the vault only by an explicit ratified remove,
     never as a silent side effect of decay."""
     fm, field = _frontmatter_fields(body)
+    _check_frontmatter_yaml(fm)
     if field("name") != slug:
         die("frontmatter name %r != slug %r" % (field("name"), slug))
     desc = field("description")

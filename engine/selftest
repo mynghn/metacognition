@@ -183,6 +183,13 @@ def main():
             "missing-sources": "\n".join(
                 l for l in VALID_ENTRY.format(slug="no-src").split("\n")
                 if not l.startswith("sources:") and not l.strip().startswith("- Author")) + "\n",
+            # colon-space in an unquoted scalar -> would break GitHub frontmatter rendering
+            "colon-desc": VALID_ENTRY.format(slug="colon-desc").replace(
+                "description: one-line retrieval trigger for colon-desc",
+                "description: load when: a colon-space breaks yaml"),
+            # colon-space in an unquoted sources item -> silently mis-parses into a mapping
+            "colon-src": VALID_ENTRY.format(slug="colon-src").replace(
+                'Author, "Title", 2026', "ReAct: Synergizing Reasoning and Acting"),
         }
         for slug, body in bad.items():
             r = run(cfg, vault, ["capture", slug], body)
@@ -190,6 +197,18 @@ def main():
             check("reject bad frontmatter: %s" % slug, r.returncode != 0 and not wrote,
                   "rc=%s wrote=%s" % (r.returncode, wrote))
         check("rejected captures made no commits", ncommits(vault) == n)
+
+        # the YAML gate must NOT over-reject: a colon-space that is properly double-quoted
+        # is valid YAML and must be admitted (description AND a sources item).
+        quoted_ok = VALID_ENTRY.format(slug="quoted-colon").replace(
+            "description: one-line retrieval trigger for quoted-colon",
+            'description: "load when: a quoted colon is fine"').replace(
+            'Author, "Title", 2026 — https://example.com',
+            '"ReAct: Synergizing — https://example.com"')
+        r = run(cfg, vault, ["capture", "quoted-colon"], quoted_ok)
+        wrote = os.path.isfile(os.path.join(tdir, "knowledge", "quoted-colon.md"))
+        check("accept properly-quoted colon-space frontmatter", r.returncode == 0 and wrote,
+              "rc=%s wrote=%s err=%s" % (r.returncode, wrote, r.stderr))
 
         # invalid slug rejects
         r = run(cfg, vault, ["capture", "Bad_Slug"], VALID_ENTRY.format(slug="Bad_Slug"))
