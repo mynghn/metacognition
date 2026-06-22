@@ -111,13 +111,21 @@ def run_trial_live(setup, sid, cwd, projects_dir, config_args, model):
     return hits[0] if hits else None
 
 
-def resolve_config(config, baseline_name):
-    """Resolve a config name to the extra claude args that apply it. The baseline applies nothing (it is
-    current state, no change). Other configs are the pluggable activation-mechanism slot — left as an
-    explicit, empty extension point here so the driver stays mechanism-agnostic; the candidate matrix
-    supplies the actual flags. Unknown non-baseline configs are allowed but apply nothing (logged)."""
+def resolve_config(config, baseline_name, configs_dir):
+    """Resolve a config name to the extra claude args that apply its activation mechanism. The baseline
+    applies nothing (current state, no change). A candidate that layers a system-prompt addition supplies
+    its text at `<configs_dir>/<config>.append-system-prompt`; this returns the matching
+    `--append-system-prompt <text>` args. A candidate whose mechanism is the run *environment* rather than
+    a launch flag — e.g. a per-skill description variant, applied by swapping the installed SKILL.md
+    around the run because Claude Code exposes no per-invocation skill-description override — carries no
+    file here and resolves to no args; its mechanism is applied outside the driver. Unknown configs
+    likewise resolve to no args."""
     if config == baseline_name:
         return []
+    sp = os.path.join(configs_dir, config + ".append-system-prompt")
+    if os.path.isfile(sp):
+        with open(sp, encoding="utf-8") as fh:
+            return ["--append-system-prompt", fh.read().strip()]
     return []
 
 
@@ -134,6 +142,8 @@ def main(argv=None):
                    help="where claude writes session transcripts")
     p.add_argument("--cwd", default=os.getcwd(), help="working dir the agent runs in (sets the transcript path)")
     p.add_argument("--model", help="model override passed to the agent")
+    p.add_argument("--configs-dir", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs"),
+                   help="dir holding candidate mechanism files (e.g. <config>.append-system-prompt)")
     args = p.parse_args(argv)
 
     if args.trials < 1:
@@ -155,7 +165,12 @@ def main(argv=None):
         return 2
     # A scenario is dropped if it is marked non-reproducible in the corpus OR named in --drop.
     drop = manual_drop | {s["id"] for s in scenarios if not s["reproducible"]}
-    config_args = resolve_config(args.config, args.baseline_config)
+    config_args = resolve_config(args.config, args.baseline_config, args.configs_dir)
+    if config_args:
+        warn("config %s applies %s (+%d-char value)"
+             % (args.config, config_args[0], len(config_args[1]) if len(config_args) > 1 else 0))
+    else:
+        warn("config %s applies no launch args" % args.config)
 
     entries, dropped, failed = [], [], []
     for scen in scenarios:

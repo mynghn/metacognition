@@ -100,6 +100,21 @@ def main():
         check("different configs predict different transcript paths (no cross-config collision)",
               c0_s1 != c3_s1, (c0_s1, c3_s1))
 
+        # resolve_config: a candidate with a configs/<name>.append-system-prompt file resolves to those args
+        cfgdir = os.path.join(root, "configs")
+        os.makedirs(cfgdir)
+        with open(os.path.join(cfgdir, "Cx.append-system-prompt"), "w", encoding="utf-8") as fh:
+            fh.write("CHECKPOINT-TEXT\n")
+        rcx = run(["--corpus", corpus, "--config", "Cx", "-n", "1", "--out", out, "--dry-run",
+                   "--projects-dir", proj, "--cwd", cwd, "--configs-dir", cfgdir])
+        check("system-prompt candidate resolves to --append-system-prompt",
+              "config Cx applies --append-system-prompt" in rcx.stderr, rcx.stderr)
+        # a config with no mechanism file (env-applied or unknown) adds no launch args
+        rcz = run(["--corpus", corpus, "--config", "Cz", "-n", "1", "--out", out, "--dry-run",
+                   "--projects-dir", proj, "--cwd", cwd, "--configs-dir", cfgdir])
+        check("config with no mechanism file applies no launch args",
+              "config Cz applies no launch args" in rcz.stderr, rcz.stderr)
+
         # malformed corpus -> clean rc 2
         bad = os.path.join(root, "bad.jsonl")
         write_jsonl(bad, ['{"id": "x", "skill": "handoff"}'])
