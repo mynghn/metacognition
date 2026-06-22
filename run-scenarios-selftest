@@ -57,12 +57,18 @@ def main():
         cwd = "/work/somewhere"
         corpus = os.path.join(root, "corpus.jsonl")
         write_jsonl(corpus, [
-            {"id": "s1", "skill": "compact-focus", "setup": "a", "framing": "deliberation", "should_fire": True},
-            {"id": "s2", "skill": "handoff", "setup": "b", "framing": "imperative", "should_fire": True},
-            {"id": "s3", "skill": "compact-focus", "setup": "c", "framing": "unrelated", "should_fire": False},
+            {"id": "s1", "skill": "compact-focus", "setup": "a", "prompt": "PROMPT-S1",
+             "framing": "deliberation", "should_fire": True, "reproducible": True},
+            {"id": "s2", "skill": "handoff", "setup": "b", "prompt": "PROMPT-S2",
+             "framing": "imperative", "should_fire": True, "reproducible": True},
+            {"id": "s3", "skill": "compact-focus", "setup": "c", "prompt": "PROMPT-S3",
+             "framing": "unrelated", "should_fire": False, "reproducible": False},  # auto-dropped
+            {"id": "s4", "skill": "handoff", "setup": "d", "prompt": "PROMPT-S4",
+             "framing": "deliberation", "should_fire": True, "reproducible": True},
         ])
 
         out = os.path.join(root, "manifest.jsonl")
+        # s2 manually dropped via --drop; s3 auto-dropped via reproducible:false; s1, s4 run
         r = run(["--corpus", corpus, "--config", "C0", "-n", "2", "--out", out,
                  "--dry-run", "--drop", "s2", "--projects-dir", proj, "--cwd", cwd])
         check("driver exits 0", r.returncode == 0, r.stderr)
@@ -70,9 +76,13 @@ def main():
 
         pairs = sorted((e["id"], e["trial"]) for e in man)
         check("manifest has one entry per (non-dropped scenario, trial 1..N)",
-              pairs == [("s1", 1), ("s1", 2), ("s3", 1), ("s3", 2)], pairs)
-        check("dropped scenario absent from manifest", all(e["id"] != "s2" for e in man), man)
-        check("dropped scenario logged on stderr", "dropped (non-reproducible): s2" in r.stderr, r.stderr)
+              pairs == [("s1", 1), ("s1", 2), ("s4", 1), ("s4", 2)], pairs)
+        check("reproducible:false scenario auto-dropped (absent from manifest, not in --drop)",
+              all(e["id"] != "s3" for e in man) and "dropped (non-reproducible): s3" in r.stderr, r.stderr)
+        check("--drop scenario dropped and logged", all(e["id"] != "s2" for e in man)
+              and "dropped (non-reproducible): s2" in r.stderr, r.stderr)
+        check("driver injects the scenario prompt, not the setup",
+              "would inject prompt 'PROMPT-S1'" in r.stderr and "would inject prompt 'PROMPT-S4'" in r.stderr, r.stderr)
         check("summary reports the run shape", "drove 2 scenarios x 2 trials -> 4 manifest entries" in r.stderr, r.stderr)
 
         check("entries are exactly the scorer's {id, trial, transcript} shape",

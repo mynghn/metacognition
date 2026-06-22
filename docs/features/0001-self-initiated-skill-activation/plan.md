@@ -35,7 +35,8 @@ Caption: the **Build** track produces the measurement instrument (a labeled corp
 - **Goal**: Stand up the labeled no-cue scenario corpus that binds every later measurement to the scoped skills (`SPEC#INV-3-scope-and-measurement-binding`) — sourced error-analysis-first from real session traces, then scaled dimensions→seeds→synthetic with matching *and* non-matching cases per `DESIGN#Decision-3-labeled-no-cue-corpus` (the real compact-focus failure is seed #1).
 - **Repo**: metacognition — `scenarios/` (+ `scenarios/README.md`)
 - **Completion**:
-  - Every scenario parses against the `DESIGN#Decision-3-labeled-no-cue-corpus` schema and carries `skill` / `setup` / `framing` / `should_fire` (one-shot schema check).
+  - Every scenario parses against the `DESIGN#Decision-3-labeled-no-cue-corpus` schema and carries `skill` / `setup` / `prompt` / `framing` / `should_fire` / `reproducible` (one-shot schema check).
+  - Each `prompt` is a verbatim first-person no-cue user turn (no skill named, no trigger command) the driver can inject — not a third-person description (`UNDERSTANDING#Delta-2-corpus-setups-are-not-replayable-turns`); each scenario is marked `reproducible` per whether a single headless turn can establish its condition.
   - Both matching and non-matching scenarios exist for each scoped skill, so false-fire is measurable (`SPEC#INV-2-false-fire-rate-bounded` becomes exercisable).
   - The ~20 seed set is hand-reviewed; trace review stops when ~20 fresh traces surface no new failure category.
 - **Dependencies**: none
@@ -63,8 +64,8 @@ Caption: the **Build** track produces the measurement instrument (a labeled corp
 - **Goal**: Deliver `run-scenarios`, the driver that produces the evidence — it replays each scenario through the agent under a named config `N` independent trials so a verdict rests on sustained behavior, not one lucky run (the "sustains across runs" clause of `SPEC#INV-1-self-use-rate-beats-baseline`), per `DESIGN#Decision-4-replayed-headless-driver`.
 - **Repo**: metacognition — root `run-scenarios` + `run-scenarios-selftest`
 - **Completion**:
-  - Selftest exercises the driver in a fixture/dry-run mode (no live agent call) and asserts it emits the correct per-(scenario, trial) transcript-path manifest for a given `--config` and `N`.
-  - A non-reproducible fixture scenario is dropped and logged, not faked (`DESIGN#Decision-4-replayed-headless-driver` reproducibility boundary).
+  - Selftest exercises the driver in a fixture/dry-run mode (no live agent call) and asserts it injects each scenario's `prompt` and emits the correct per-(scenario, trial) transcript-path manifest for a given `--config` and `N`.
+  - A `reproducible:false` fixture scenario is dropped and logged, not faked (`DESIGN#Decision-4-replayed-headless-driver` reproducibility boundary; the marker comes from `DESIGN#Decision-3-labeled-no-cue-corpus`).
 - **Dependencies**: B1 lands the corpus the driver replays.
 
 ## Task: R1

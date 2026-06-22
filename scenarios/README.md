@@ -29,9 +29,11 @@ One JSON object per line (JSONL — the transcripts the scorer reads are already
 | --- | --- | --- |
 | `id` | string | stable unique id (`cf-NN` compact-focus, `ho-NN` handoff) |
 | `skill` | `"compact-focus"` \| `"handoff"` | the scoped skill the scenario is about |
-| `setup` | string | the triggering condition **plus** the no-cue user turn, generic (no proprietary content) |
+| `setup` | string | analyst-facing description of the triggering condition + framing, generic (no proprietary content) |
+| `prompt` | string | the **verbatim first-person no-cue user turn the driver injects** — what the agent actually receives (a description fed as a prompt makes the agent reason *about* the scenario, not *be in* it) |
 | `framing` | `deliberation` \| `imperative` \| `tangential` \| `unrelated` | how the user's turn carries the moment |
 | `should_fire` | bool | whether the scoped skill should self-activate on this moment |
+| `reproducible` | bool | whether a single headless turn can establish the condition; the driver drops `false` (logged) |
 
 `framing`: **deliberation** = the user openly weighs the decision; **imperative** = a forward command that
 creates the boundary; **tangential** = the condition is incidental to what the user asked; **unrelated** =
@@ -53,6 +55,28 @@ handoff        deliberation  true 3
 handoff        imperative    true 8  false 3
 handoff        tangential           false 2
 ```
+
+## Replayability — what the headless driver can measure
+
+A scenario is only useful to the live driver if a single headless turn can establish its condition. The
+driver injects the `prompt` and drops every `reproducible:false` scenario (logged, not faked). The split is
+**fundamental, not incidental**:
+
+- **compact-focus's trigger is the live window actually being heavy/long** — a state a fresh `claude -p`
+  process cannot embody, and describing it in a prompt does not make the window heavy. So **all 10
+  compact-focus positives are `reproducible:false`**, and **compact-focus self-use is not measurable headlessly
+  at all** — only its false-fire (on genuinely-light fresh sessions) is.
+- **handoff's trigger is a boundary departing to a new goal**, which a single turn *can* self-contain (finished
+  prior work stated compactly + the new goal). All 16 handoff scenarios are `reproducible:true`.
+
+| skill | self-use (reproducible positives) | false-fire (reproducible negatives) |
+| --- | --- | --- |
+| compact-focus | **0 — not headlessly measurable** | 4 |
+| handoff | 11 | 5 |
+
+A live pilot confirmed both the mechanism and the failure: handed the injected first-person `prompt` for a
+plan→implement boundary, the agent said *"I'm at the handoff from planning to implementation"* and produced a
+manual checkpoint — but never invoked the handoff skill. The miss is behavioral, not a replay artifact.
 
 ## How it was built
 
@@ -93,7 +117,8 @@ its verdict is trusted.
 - **Cue confound.** Nearly every real positive is either a cued-fire or a no-cue miss where a cue arrived a
   turn later, so the corpus measures the self-activation *gap* well but offers few clean, isolated no-cue
   moments with no nearby cue at all.
-- **Stateful-trigger reproducibility.** Many compact-focus triggers ("the context is heavy") are stateful and
-  hard to recreate with a single headless prompt. The driver drops and logs any scenario whose condition
-  cannot be reproduced deterministically rather than faking it, so headless coverage may under-represent the
-  stateful triggers; that gap is a known limitation, not a clean zero.
+- **compact-focus self-use is not headlessly measurable.** Its trigger is the live window's actual state, which
+  a single headless turn cannot reproduce, so all 10 compact-focus positives are dropped (see *Replayability*).
+  The headless baseline therefore covers handoff self-use + both skills' false-fire, but says nothing about
+  compact-focus self-activation — which likely needs a multi-turn / stateful replay or a harness-level signal,
+  an escalation this instrument surfaces rather than hides.

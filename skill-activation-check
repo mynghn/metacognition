@@ -65,8 +65,8 @@ def load_corpus(path):
                 rec = json.loads(line)
             except json.JSONDecodeError as exc:
                 raise InputError("corpus %s:%d is not valid JSON (%s)" % (path, lineno, exc))
-            if not isinstance(rec, dict) or set(rec) != SCHEMA_KEYS:
-                raise InputError("corpus %s:%d does not match the scenario schema "
+            if not isinstance(rec, dict) or not SCHEMA_KEYS.issubset(rec):
+                raise InputError("corpus %s:%d is missing required scenario fields "
                                  "{id, skill, setup, framing, should_fire}" % (path, lineno))
             if rec["skill"] not in transcript.SCOPED_SKILLS:
                 raise InputError("corpus %s:%d skill %r is not a scoped skill" % (path, lineno, rec["skill"]))

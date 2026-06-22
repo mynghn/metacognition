@@ -12,3 +12,19 @@ Scope of impact (bare anchors — no restatement):
 - DESIGN#Decision-1-eval-gated-mechanism-slot — `C0` baseline is trigger-first; the `C3` description-variant arm must add the **capability-first** contrast so the matrix adjudicates whether `29c45d0` earned its keep (keep or revert, with data).
 - TASK#Task:R1 — the baseline captured on `C0` now records the trigger-first state.
 - TASK#Task:R2 — the candidate matrix's description-variant arm gains the capability-first contrast.
+
+## Delta-2: corpus-setups-are-not-replayable-turns
+
+A scenario's `setup` is a **third-person description** of the triggering condition, not the **first-person user turn** the agent receives. Fed to the headless driver as the prompt, the agent reasons *about* the scenario instead of *being in* it — so the scoped skill never becomes a live option and the run scores a miss for a replay-fidelity reason, not a behavioral one. Compounding it, a fresh headless process has none of the accumulated state that makes a condition real (compact-focus's "context is heavy" cannot exist one-shot), so most scenarios are not headlessly reproducible at all.
+
+Kills the assumption that "seed the scenario's `setup`" yields a faithful replay. It does not: the baseline it would produce is ~0% self-use across the board — a too-easy, invalid measurement — which the corpus-discrimination invalidation cue forbids trusting.
+
+Why (disturbance + verification verdict): a live pilot of `run-scenarios` on `cf-01` and `ho-01` under `C0` (the live path itself validated: driver → `claude -p` → transcript discovery → scorer all work). Verified, not inferred: in the `cf-01` transcript the agent, handed the description, correctly judged "this is the right moment to compact" and *offered to hand-write a `/compact` line itself* — the exact target failure — yet the compact-focus skill never fired; both scenarios scored 0/1.
+
+Resolution (chosen): each scenario carries a replayable first-person no-cue **`prompt`** the driver injects verbatim, plus a per-scenario **`reproducible`** marker; the driver primes minimal context where feasible and **drops + logs** the scenarios that still cannot be reproduced (the stateful ones), rather than faking a green result.
+
+Scope of impact (bare anchors — no restatement):
+- DESIGN#Decision-3-labeled-no-cue-corpus — the schema gains `prompt` (the verbatim replayable turn) and `reproducible` (bool); `setup` stays as the analyst-facing description.
+- DESIGN#Decision-4-replayed-headless-driver — the driver injects `prompt`, not `setup`; the reproducibility boundary becomes a per-scenario `reproducible` marker the driver enforces (drop + log), with optional minimal priming.
+- TASK#Task:B1 — scenarios carry `prompt` + `reproducible`; reproducible scenarios' prompts are genuine no-cue turns.
+- TASK#Task:B4 — the driver injects `prompt` and drops `reproducible:false` scenarios, logged.
