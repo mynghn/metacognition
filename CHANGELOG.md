@@ -3,6 +3,15 @@
 Notable changes to the **Metacognition tooling** (this repo). The companion knowledge
 corpus lives in [`metacognition-vault`](https://github.com/mynghn/metacognition-vault).
 
+## [Unreleased]
+
+### Changed
+
+- **Source policy (`SOURCES.md`):** allowlisted `agentskills.io` (the Agent Skills / SKILL.md open
+  standard) under "Official standards & specifications" — it was wrongly sub-tier, so four
+  `skill-design` entries citing the spec were flagged despite sound sourcing. Surfaced by a
+  maintenance pass: the corpus has no genuine decay; this was a policy gap, not decayed knowledge.
+
 ## [0.1.0] — 2026-06-22
 
 ### Added — `0010-vault-self-evolution`: on-demand, ratified self-maintenance for the vault
