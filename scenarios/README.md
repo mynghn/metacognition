@@ -78,6 +78,38 @@ A live pilot confirmed both the mechanism and the failure: handed the injected f
 plan→implement boundary, the agent said *"I'm at the handoff from planning to implementation"* and produced a
 manual checkpoint — but never invoked the handoff skill. The miss is behavioral, not a replay artifact.
 
+## Recorded baseline (C0)
+
+`baseline-C0.json` — the first real measurement, current state with no activation mechanism applied (the
+state that already ships the trigger-first skill descriptions). Every candidate is scored relative to it.
+
+| | self-use | false-fire | n_trials | model |
+| --- | --- | --- | --- | --- |
+| **C0** | **0.09** (handoff only) | **0.00** | 3 | Opus 4.8 |
+
+What it says: **scoped skills do not self-activate on cueless moments.** Across 11 reproducible handoff
+positives × 3 trials, only one (`ho-01`, the most explicitly trigger-shaped wording) fired, and it fired on
+every trial; the other ten missed on every trial. The gap the project exists to measure is real and large,
+not a rounding artifact — and it is *not* a too-easy corpus (a near-100% baseline would be the invalidation
+cue). Self-activation is also non-deterministic across the boundary: a single pilot trial of `ho-08` fired,
+yet all three baseline trials of `ho-08` missed — which is why a verdict aggregates N trials and never reads
+one run.
+
+Read with the scope and the caveats above:
+
+- **Self-use is handoff-only.** All 10 compact-focus positives are dropped as non-reproducible (see
+  *Replayability*), so this number says nothing about compact-focus self-activation.
+- **Trust the 0.00 false-fire weakly.** It rests on 9 negatives, mostly synthetic/cued (see *Known
+  limitations*); it is consistent with no false firing, not proof of it.
+- **Gate parameters** recorded with the baseline: `margin 0.10` (a candidate must lift self-use by ≥10 points
+  to be worth its added machinery) and `false_fire_bar 0.10` (≤1-in-10 negatives may fire before "crying
+  wolf" outweighs the recall gain). Both are provisional product decisions, refinable before the candidate
+  matrix is run.
+
+Reproduce: `run-scenarios --corpus scenarios/corpus.jsonl --config C0 -n 3 --out <manifest> --cwd <fresh-dir>
+--model claude-opus-4-8`, then `skill-activation-check --corpus scenarios/corpus.jsonl --runs <manifest>
+--record-baseline scenarios/baseline-C0.json --margin 0.10 --bar 0.10`.
+
 ## How it was built
 
 Error-analysis-first, the highest-ROI and most-skipped eval activity: real session transcripts were reviewed
