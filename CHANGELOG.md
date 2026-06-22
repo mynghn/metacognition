@@ -3,7 +3,7 @@
 Notable changes to the **Metacognition tooling** (this repo). The companion knowledge
 corpus lives in [`metacognition-vault`](https://github.com/mynghn/metacognition-vault).
 
-## [Unreleased]
+## [0.1.0] — 2026-06-22
 
 ### Added — `0010-vault-self-evolution`: on-demand, ratified self-maintenance for the vault
 
@@ -49,6 +49,13 @@ envelope, not unguarded.
   for a fabricated citation and a silent loss, then accepting the corrected version**.
 - Every step adversarially verified before commit; all self-tests green (engine 105, maintenance 66,
   install 46, generate 62, health-check 19, no-net-loss 22).
+
+### Changed
+
+- **Registry (`FAMILY.md`):** marked the four delivered siblings — `agent-architectures`,
+  `agent-runtime`, `evaluation-observability`, `skill-design` — **built** (with entry counts) and
+  synced the `context-engineering` count, correcting stale `planned` labels. Ratified through the new
+  **T3 family-evolution path** — i.e. dogfooded the feature on its own registry.
 
 Design docs (the LeanPlan requirement → spec → design → plan → understanding chain) live in the
 feature workspace, outside this repo.
