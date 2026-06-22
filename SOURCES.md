@@ -14,7 +14,7 @@ A citation clears the bar when it is one of:
 - **Peer-reviewed or foundational research** — arXiv, ACL Anthology, OpenReview, NeurIPS/ICML
   proceedings, ACM DL, and the canonical first-party report behind a named result.
 - **Official standards & specifications** — the standards body or spec home itself (OWASP,
-  IETF, W3C, the Model Context Protocol spec).
+  IETF, W3C, the Model Context Protocol spec, the Agent Skills / SKILL.md standard at agentskills.io).
 - **First-party vendor engineering docs** — the vendor's own documentation/research for the
   system under discussion (Anthropic, OpenAI, the model/framework's own docs site). Vendor
   *marketing* pages do not clear the bar; vendor *engineering/research* pages do.
@@ -49,6 +49,7 @@ distill.pub
 *.ietf.org
 *.w3.org
 modelcontextprotocol.io
+agentskills.io
 
 # First-party model / framework / vendor engineering docs
 *.anthropic.com
