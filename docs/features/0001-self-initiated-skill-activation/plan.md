@@ -70,7 +70,7 @@ Caption: the **Build** track produces the measurement instrument (a labeled corp
 
 ## Task: R1
 
-- **Goal**: Establish the baseline — the first real measurement that makes the gap countable (`SPEC#INV-3-scope-and-measurement-binding`'s "baseline recorded before any change") — by running the corpus through config `C0` (`DESIGN#Decision-1-eval-gated-mechanism-slot`, now reflecting main's trigger-first wiring — `UNDERSTANDING#Delta-1-baseline-now-ships-trigger-first-wiring`) and recording the rates plus the product-decision `margin`/`bar` into the baseline artifact (`DESIGN#Decision-5-promotion-gate`).
+- **Goal**: Establish the baseline — the first real measurement that makes the gap countable (`SPEC#INV-3-scope-and-measurement-binding`'s "baseline recorded before any change") — by running the corpus through config `C0` (`DESIGN#Decision-1-eval-gated-mechanism-slot`; the scoped skills are capability-first, `UNDERSTANDING#Delta-3-scoped-skills-stay-capability-first`) and recording the rates plus the product-decision `margin`/`bar` into the baseline artifact (`DESIGN#Decision-5-promotion-gate`).
 - **Repo**: metacognition — `scenarios/` baseline artifact
 - **Completion**:
   - A baseline artifact exists with `self_use_rate`, `false_fire_rate`, `margin`, `false_fire_bar`, `n_trials` (one-shot observation).
@@ -79,7 +79,7 @@ Caption: the **Build** track produces the measurement instrument (a labeled corp
 
 ## Task: R2
 
-- **Goal**: Run the candidate matrix and produce the project's verdict — promote a mechanism only if it clears the gate, making the skill fire on cueless moments (`SPEC#O-1-skill-fires-on-cueless-match`) within `SPEC#INV-1-self-use-rate-beats-baseline` and `SPEC#INV-2-false-fire-rate-bounded`, else deliver the negative result + baseline — per `DESIGN#Decision-1-eval-gated-mechanism-slot` and `DESIGN#Decision-5-promotion-gate`. Each candidate (checkpoint, reflection pass, description variants — incl. the capability-first contrast adjudicating the shipped `29c45d0` trigger-first wiring per `UNDERSTANDING#Delta-1-baseline-now-ships-trigger-first-wiring`, keyword control) is authored as a test input.
+- **Goal**: Run the candidate matrix and produce the project's verdict — promote a mechanism only if it clears the gate, making the skill fire on cueless moments (`SPEC#O-1-skill-fires-on-cueless-match`) within `SPEC#INV-1-self-use-rate-beats-baseline` and `SPEC#INV-2-false-fire-rate-bounded`, else deliver the negative result + baseline — per `DESIGN#Decision-1-eval-gated-mechanism-slot` and `DESIGN#Decision-5-promotion-gate`. Each candidate (checkpoint, reflection pass, description variants — incl. the trigger-first contrast against the capability-first scoped skills per `UNDERSTANDING#Delta-3-scoped-skills-stay-capability-first`, keyword control) is authored as a test input.
 - **Repo**: metacognition — candidate configs + the verdict record
 - **Completion**:
   - Each candidate has a scored result (self-use + false-fire vs baseline) and a gate verdict (`skill-activation-check` output per config).

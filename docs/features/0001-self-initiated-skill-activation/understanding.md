@@ -13,6 +13,20 @@ Scope of impact (bare anchors — no restatement):
 - TASK#Task:R1 — the baseline captured on `C0` now records the trigger-first state.
 - TASK#Task:R2 — the candidate matrix's description-variant arm gains the capability-first contrast.
 
+## Delta-3: scoped-skills-stay-capability-first
+
+`29c45d0`'s trigger-first reordering covered the five **KB-wiring** skills only. The eval's **scoped** skills — `handoff` and `compact-focus` — are chezmoi-managed, were outside that commit, and **remain capability-first**: each description leads with the capability ("Generate a … brief / `/compact` line"), then a "Use when / at …" trigger clause second. So for what this eval actually measures, `C0` is the **capability-first** state, and trigger-first ordering of the scoped skills is a genuine **unshipped candidate**, not a shipped change to keep-or-revert.
+
+Refines `UNDERSTANDING#Delta-1-baseline-now-ships-trigger-first-wiring`: Delta-1 is right that `29c45d0` shipped trigger-first KB wiring on plausibility, but wrong where it inferred that `C0`'s eval-relevant state is trigger-first and that `C3` must therefore add a *capability-first* contrast — that contrast would only duplicate `C0`. The correct contrast is the reverse: **`C3` is the trigger-first variant of the scoped skills**, against the capability-first `C0`. The eval adjudicates the trigger-first *theory* as applied to the scoped skills; it informs `29c45d0`'s keep/revert question by extension but does not directly measure the KB-wiring skills (out of scope, `SPEC#INV-3-scope-and-measurement-binding`).
+
+Why (disturbance + verification verdict): impl-time inspection of the installed scoped skills at R2 entry. Verified, not inferred: `~/.claude/skills/handoff/SKILL.md` and `~/.claude/skills/compact-focus/SKILL.md` both lead with the capability and place the "Use when/at …" clause second (capability-first). This matches `research.md#baseline-reflects-shipped-trigger-first-wiring` ("compact-focus / handoff … remain capability-first"), the authoritative fact Delta-1's inference had drifted from. The `C0` baseline number is unaffected — `C0` is current state however its descriptions are ordered.
+
+Scope of impact (bare anchors — no restatement):
+- UNDERSTANDING#Delta-1-baseline-now-ships-trigger-first-wiring — its KB-wiring fact stands; its `C0`/`C3` scoped-skill inference is corrected here.
+- DESIGN#Decision-1-eval-gated-mechanism-slot — `C3` is the trigger-first scoped-skill variant contrasted against the capability-first `C0`.
+- TASK#Task:R1 — the recorded baseline is `C0` = capability-first scoped skills (the number stands; only the "trigger-first state" wording was inaccurate).
+- TASK#Task:R2 — the description-variant arm is trigger-first, not capability-first.
+
 ## Delta-2: corpus-setups-are-not-replayable-turns
 
 A scenario's `setup` is a **third-person description** of the triggering condition, not the **first-person user turn** the agent receives. Fed to the headless driver as the prompt, the agent reasons *about* the scenario instead of *being in* it — so the scoped skill never becomes a live option and the run scores a miss for a replay-fidelity reason, not a behavioral one. Compounding it, a fresh headless process has none of the accumulated state that makes a condition real (compact-focus's "context is heavy" cannot exist one-shot), so most scenarios are not headlessly reproducible at all.
