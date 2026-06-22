@@ -20,6 +20,12 @@ Maintenance skill (W6): a full install deploys the family-level metacognition-ma
 (SKILL.md + references/) byte-identical to both providers with its @-tokens baked absolute, ships no
 extra (scheduler/trigger) artifact so nothing runs unattended, is idempotent, deploys via `--only metacognition-maintenance`
 yet is left untouched by a surgical `--only <sibling>`, and a file with an unbakeable @TOKEN@ is a clean error.
+
+Practice-skill lane: a full install deploys the authored practice skills (handoff, compact-focus) per-provider
+(each provider its own SKILL.md from claude/ or codex/, @VAULT@ baked) plus a shared provider-neutral activation block
+upserted into AGENTS.md; set-keyed discovery picks up a new skills/practice/<x>/ dir with no code change; the Codex bodies
+carry no $ARGUMENTS; the activation upsert is surgical + idempotent; `--only <practice>` deploys just it; a surgical
+`--only <sibling>` leaves them alone; and an unbakeable @TOKEN@ is a clean error.
 """
 import os
 import re
@@ -162,6 +168,128 @@ def main():
         finally:
             os.remove(bogus)
             shutil.rmtree(d_bog, ignore_errors=True)
+
+        # ---- practice-skill lane: per-provider SKILL.md + provider-neutral activation ----
+        PRACTICE = ["handoff", "compact-focus"]
+        psrc = os.path.join(ROOT, "skills", "practice")
+
+        def baked(t):
+            return t.replace("@VAULT@", os.path.abspath(_VAULT))
+
+        d_ps = tempfile.mkdtemp(prefix="kb-install-")
+        try:
+            r = run(["--dest", d_ps])
+            check("practice: install exits 0", r.returncode == 0, r.stderr)
+            for name in PRACTICE:
+                c = os.path.join(d_ps, ".claude", "skills", name, "SKILL.md")
+                x = os.path.join(d_ps, ".codex", "skills", name, "SKILL.md")
+                check("practice %s: deployed to both providers" % name, os.path.isfile(c) and os.path.isfile(x))
+                # each provider gets ITS OWN per-provider body, == its source with @VAULT@ baked
+                csrc = open(os.path.join(psrc, name, "claude", "SKILL.md"), encoding="utf-8").read()
+                xsrc = open(os.path.join(psrc, name, "codex", "SKILL.md"), encoding="utf-8").read()
+                check("practice %s: Claude deploy == claude/ source (baked)" % name,
+                      os.path.isfile(c) and read(d_ps, ".claude", name) == baked(csrc))
+                check("practice %s: Codex deploy == codex/ source (baked)" % name,
+                      os.path.isfile(x) and read(d_ps, ".codex", name) == baked(xsrc))
+            # the Codex bodies carry no Claude-only $ARGUMENTS substitution
+            check("practice: no $ARGUMENTS in any Codex body",
+                  all("$ARGUMENTS" not in read(d_ps, ".codex", n) for n in PRACTICE))
+            # @VAULT@ baked: no leftover @TOKEN@ in any deployed body; the baked path is present
+            allp = "".join(read(d_ps, pr, n) for n in PRACTICE for pr in (".claude", ".codex"))
+            check("practice: @VAULT@ baked, no leftover @TOKEN@", not re.search(r"@[A-Z_]+@", allp),
+                  re.findall(r"@[A-Z_]+@", allp)[:5])
+            check("practice: baked vault path present in a deployed body", os.path.abspath(_VAULT) in allp)
+            # activation: both spans upserted into the shared AGENTS.md, provider-neutral
+            agp = open(os.path.join(d_ps, "AGENTS.md"), encoding="utf-8").read()
+            check("practice: <handoff> + <compaction> spans in AGENTS.md",
+                  bool(re.search(r"^<handoff>$", agp, re.M)) and bool(re.search(r"^<compaction>$", agp, re.M)))
+            check("practice: activation provider-neutral (no 'On Claude')", "On Claude" not in agp)
+            # idempotent re-run (bodies + AGENTS.md)
+            snap = {n: read(d_ps, ".claude", n) for n in PRACTICE}
+            run(["--dest", d_ps])
+            check("practice: idempotent re-run (bodies)", all(read(d_ps, ".claude", n) == snap[n] for n in PRACTICE))
+            check("practice: idempotent re-run (AGENTS.md)",
+                  open(os.path.join(d_ps, "AGENTS.md"), encoding="utf-8").read() == agp)
+        finally:
+            shutil.rmtree(d_ps, ignore_errors=True)
+
+        # set-keyed: a NEW skills/practice/<x>/ dir deploys with no install code change
+        probe = os.path.join(psrc, "_selftest_probe")
+        os.makedirs(os.path.join(probe, "claude"))
+        os.makedirs(os.path.join(probe, "codex"))
+        open(os.path.join(probe, "claude", "SKILL.md"), "w").write("---\nname: _selftest_probe\ndescription: probe\n---\n\nclaude body\n")
+        open(os.path.join(probe, "codex", "SKILL.md"), "w").write("---\nname: _selftest_probe\ndescription: probe\ncompatibility: Designed for Codex\n---\n\ncodex body\n")
+        open(os.path.join(probe, "agents.md"), "w").write("<_selftest_probe>\nprobe trigger\n</_selftest_probe>\n")
+        d_set = tempfile.mkdtemp(prefix="kb-install-")
+        try:
+            r = run(["--dest", d_set, "--only", "_selftest_probe"])
+            check("practice set-keyed: a new dir deploys with no code change",
+                  r.returncode == 0
+                  and os.path.isfile(os.path.join(d_set, ".claude", "skills", "_selftest_probe", "SKILL.md"))
+                  and os.path.isfile(os.path.join(d_set, ".codex", "skills", "_selftest_probe", "SKILL.md")), r.stderr)
+        finally:
+            shutil.rmtree(d_set, ignore_errors=True)
+            shutil.rmtree(probe, ignore_errors=True)
+
+        # an unbakeable @TOKEN@ in a practice body -> clean error (never ship a broken path)
+        badp = os.path.join(psrc, "_selftest_badtoken")
+        os.makedirs(os.path.join(badp, "claude"))
+        os.makedirs(os.path.join(badp, "codex"))
+        open(os.path.join(badp, "claude", "SKILL.md"), "w").write("---\nname: x\ndescription: y\n---\n\nrefs @BOGUS_TOKEN@\n")
+        open(os.path.join(badp, "codex", "SKILL.md"), "w").write("---\nname: x\ndescription: y\n---\n\nok\n")
+        open(os.path.join(badp, "agents.md"), "w").write("<x>\nt\n</x>\n")
+        d_bt = tempfile.mkdtemp(prefix="kb-install-")
+        try:
+            rb = run(["--dest", d_bt, "--only", "_selftest_badtoken"])
+            check("practice: unbaked token -> clean error (no traceback)",
+                  rb.returncode != 0 and "unbaked token" in rb.stderr and "Traceback" not in rb.stderr, rb.stderr)
+        finally:
+            shutil.rmtree(d_bt, ignore_errors=True)
+            shutil.rmtree(badp, ignore_errors=True)
+
+        # `--only <practice-name>` deploys ONLY that practice skill (no siblings, no maintenance)
+        d_op = tempfile.mkdtemp(prefix="kb-install-")
+        try:
+            rp = run(["--dest", d_op, "--only", "handoff"])
+            sdir = os.path.join(d_op, ".claude", "skills")
+            present = sorted(os.listdir(sdir)) if os.path.isdir(sdir) else []
+            check("--only handoff: deploys just that practice skill",
+                  rp.returncode == 0 and present == ["handoff"], "%s / %s" % (rp.stderr.strip(), present))
+        finally:
+            shutil.rmtree(d_op, ignore_errors=True)
+
+        # a surgical `--only <sibling>` leaves the practice skills untouched
+        d_sp = tempfile.mkdtemp(prefix="kb-install-")
+        try:
+            run(["--dest", d_sp, "--only", "tool-design"])
+            check("--only sibling: practice skills left untouched",
+                  not os.path.isdir(os.path.join(d_sp, ".claude", "skills", "handoff"))
+                  and not os.path.isdir(os.path.join(d_sp, ".claude", "skills", "compact-focus")))
+        finally:
+            shutil.rmtree(d_sp, ignore_errors=True)
+
+        # activation upsert is surgical: takes over a pre-existing <handoff> span, preserves neighbours
+        d_surgp = tempfile.mkdtemp(prefix="kb-install-")
+        try:
+            agp2 = os.path.join(d_surgp, "AGENTS.md")
+            open(agp2, "w", encoding="utf-8").write(
+                "<user_sentinel>\nkeep me\n</user_sentinel>\n\n"
+                "<handoff>\nSTALE HANDOFF\n</handoff>\n\n"
+                "<closing_sentinel>\nkeep me too\n</closing_sentinel>\n")
+            run(["--dest", d_surgp, "--only", "handoff"])
+            out = open(agp2, encoding="utf-8").read()
+            check("practice surgical: user blocks preserved",
+                  "<user_sentinel>\nkeep me\n</user_sentinel>" in out and "<closing_sentinel>\nkeep me too\n</closing_sentinel>" in out)
+            check("practice surgical: stale handoff replaced in place",
+                  "STALE HANDOFF" not in out and bool(re.search(r"^<handoff>$", out, re.M))
+                  and out.index("<handoff>") < out.index("<closing_sentinel>"))
+        finally:
+            shutil.rmtree(d_surgp, ignore_errors=True)
+
+        # the installer docstring documents the practice-skill lane
+        instxt = open(INSTALL, encoding="utf-8").read()
+        check("install docstring documents the practice-skill lane",
+              "five things" in instxt and "skills/practice" in instxt)
 
         d2 = tempfile.mkdtemp(prefix="kb-install-")
         try:
