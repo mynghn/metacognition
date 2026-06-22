@@ -1,0 +1,183 @@
+#!/usr/bin/env python3
+"""run-scenarios — the driver: replays each corpus scenario through the agent under a named config,
+N independent trials per scenario, and emits the per-(scenario, trial) transcript manifest the scorer
+reads. A thin wrapper over headless `claude` (print mode), in the framework's root-executable idiom.
+
+WHY N trials: self-activation is non-deterministic, so a single run is noise — a verdict must rest on
+sustained behaviour. Each scenario is replayed N independent trials per config and the scorer aggregates
+the firing fraction across them, never reads one lucky run.
+
+WHY a config is the only mechanism input: the activation mechanism under test is a pluggable slot the
+driver applies before running the corpus (baseline C0 = current state, no change; candidates layer a
+system-prompt / setting). The mechanism enters ONLY here as `--config`; it is never wired into the
+scorer, so what is measured stays separable from how it is measured.
+
+REPRODUCIBILITY BOUNDARY: some triggering conditions (e.g. compact-focus's "the context is heavy") are
+stateful and cannot be recreated by a single headless prompt the way an explicit turn can. A scenario
+whose condition cannot be reproduced deterministically is DROPPED and logged, never faked into a green
+result — the dropped set is surfaced on stderr, not hidden. The drop set is passed explicitly (--drop):
+the corpus schema is fixed and cannot carry a per-scenario flag, and true non-reproducibility cannot be
+judged from the setup text without a live probe, so the boundary is a curated, auditable input here.
+
+Transcript discovery is deterministic: each trial runs with an explicit `--session-id`, so the transcript
+path is known up front (the session id is unique) rather than guessed by diffing the projects directory.
+`--dry-run` emits the manifest WITHOUT invoking the agent (no live call), for offline verification.
+
+Output: the manifest (JSONL: one {id, trial, transcript} per trial) to --out; a run summary and the
+dropped set to stderr. Exit 0 normal, 2 on a usage/input error (clean message, no traceback).
+"""
+import argparse
+import json
+import os
+import subprocess
+import sys
+import uuid
+
+PROG = "run-scenarios"
+SCHEMA_KEYS = {"id", "skill", "setup", "framing", "should_fire"}
+# A fixed namespace so a (config, id, trial) maps to a stable session id — a dry-run predicts exactly the
+# path a live run would write, and a re-run is reproducible.
+_NS = uuid.UUID("6f6e2d63-7565-4163-7469-766174696f6e")
+
+
+def warn(msg):
+    sys.stderr.write("%s: %s\n" % (PROG, msg))
+
+
+class InputError(Exception):
+    """A usage / input problem: exit 2 with a clean message."""
+
+
+def load_corpus(path):
+    """Read the labeled corpus into an ordered list of scenarios; validate the schema so a malformed
+    corpus fails loud here rather than producing a silently-wrong run."""
+    scenarios = []
+    seen = set()
+    with open(path, encoding="utf-8") as fh:
+        for lineno, raw in enumerate(fh, 1):
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise InputError("corpus %s:%d is not valid JSON (%s)" % (path, lineno, exc))
+            if not isinstance(rec, dict) or set(rec) != SCHEMA_KEYS:
+                raise InputError("corpus %s:%d does not match the scenario schema "
+                                 "{id, skill, setup, framing, should_fire}" % (path, lineno))
+            if rec["id"] in seen:
+                raise InputError("corpus %s:%d duplicate scenario id %r" % (path, lineno, rec["id"]))
+            seen.add(rec["id"])
+            scenarios.append(rec)
+    return scenarios
+
+
+def cwd_slug(cwd):
+    """Claude Code's project-dir encoding of a cwd: '/' and '.' both become '-'."""
+    return cwd.replace("/", "-").replace(".", "-")
+
+
+def session_id(config, scenario_id, trial):
+    """A stable session id for one (config, scenario, trial)."""
+    return str(uuid.uuid5(_NS, "%s|%s|%d" % (config, scenario_id, trial)))
+
+
+def predicted_transcript(projects_dir, cwd, sid):
+    """The path the headless run with session id `sid` will write its transcript to."""
+    return os.path.join(projects_dir, cwd_slug(cwd), sid + ".jsonl")
+
+
+def run_trial_live(setup, sid, cwd, projects_dir, config_args, model):
+    """Invoke headless claude for one trial and return the transcript path it produced, or None if the
+    run produced no transcript. The explicit --session-id makes the path deterministic; the run is still
+    located by globbing on the id so a differing cwd-slug cannot hide it."""
+    cmd = ["claude", "-p", setup, "--session-id", sid, "--output-format", "json"]
+    if model:
+        cmd += ["--model", model]
+    cmd += config_args
+    subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    cand = predicted_transcript(projects_dir, cwd, sid)
+    if os.path.exists(cand):
+        return cand
+    import glob
+    hits = glob.glob(os.path.join(projects_dir, "*", sid + ".jsonl"))
+    return hits[0] if hits else None
+
+
+def resolve_config(config, baseline_name):
+    """Resolve a config name to the extra claude args that apply it. The baseline applies nothing (it is
+    current state, no change). Other configs are the pluggable activation-mechanism slot — left as an
+    explicit, empty extension point here so the driver stays mechanism-agnostic; the candidate matrix
+    supplies the actual flags. Unknown non-baseline configs are allowed but apply nothing (logged)."""
+    if config == baseline_name:
+        return []
+    return []
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(prog=PROG, description="Replay the scenario corpus through the agent under a config.")
+    p.add_argument("--corpus", required=True, help="labeled scenario corpus (JSONL)")
+    p.add_argument("--config", required=True, help="config to run under (baseline C0, or a candidate)")
+    p.add_argument("-n", "--trials", type=int, default=1, help="independent trials per scenario (default 1)")
+    p.add_argument("--out", required=True, help="manifest output path (JSONL of {id, trial, transcript})")
+    p.add_argument("--dry-run", action="store_true", help="emit the manifest without invoking the agent")
+    p.add_argument("--drop", default="", help="comma-separated scenario ids to drop as non-reproducible")
+    p.add_argument("--baseline-config", default="C0", help="the config name treated as no-change baseline")
+    p.add_argument("--projects-dir", default=os.path.expanduser("~/.claude/projects"),
+                   help="where claude writes session transcripts")
+    p.add_argument("--cwd", default=os.getcwd(), help="working dir the agent runs in (sets the transcript path)")
+    p.add_argument("--model", help="model override passed to the agent")
+    args = p.parse_args(argv)
+
+    if args.trials < 1:
+        warn("--trials must be >= 1")
+        return 2
+    try:
+        scenarios = load_corpus(args.corpus)
+    except InputError as exc:
+        warn(str(exc))
+        return 2
+    except FileNotFoundError as exc:
+        warn("input not found: %s" % exc)
+        return 2
+
+    drop = {d.strip() for d in args.drop.split(",") if d.strip()}
+    unknown_drop = drop - {s["id"] for s in scenarios}
+    if unknown_drop:
+        warn("--drop names ids not in the corpus: %s" % ", ".join(sorted(unknown_drop)))
+        return 2
+    config_args = resolve_config(args.config, args.baseline_config)
+
+    entries, dropped, failed = [], [], []
+    for scen in scenarios:
+        if scen["id"] in drop:
+            dropped.append(scen["id"])
+            continue
+        for trial in range(1, args.trials + 1):
+            sid = session_id(args.config, scen["id"], trial)
+            if args.dry_run:
+                tx = predicted_transcript(args.projects_dir, args.cwd, sid)
+            else:
+                tx = run_trial_live(scen["setup"], sid, args.cwd, args.projects_dir, config_args, args.model)
+                if tx is None:
+                    failed.append("%s/trial-%d" % (scen["id"], trial))
+                    continue
+            entries.append({"id": scen["id"], "trial": trial, "transcript": tx})
+
+    with open(args.out, "w", encoding="utf-8") as fh:
+        for e in entries:
+            fh.write(json.dumps(e) + "\n")
+
+    for sid in dropped:
+        warn("dropped (non-reproducible): %s" % sid)
+    for f in failed:
+        warn("no transcript produced (run failed): %s" % f)
+    warn("config %s: drove %d scenarios x %d trials -> %d manifest entries%s%s -> %s"
+         % (args.config, len(scenarios) - len(dropped), args.trials, len(entries),
+            (" (%d dropped)" % len(dropped)) if dropped else "",
+            (" (%d trials failed)" % len(failed)) if failed else "", args.out))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

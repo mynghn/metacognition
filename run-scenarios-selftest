@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+"""run-scenarios-selftest — behavioral tests for the driver, in dry-run (no live agent call).
+
+Each test pins a property the driver must preserve (run after any change); it drives the REAL tool via
+subprocess in --dry-run over a fixture corpus in a tmpdir:
+  - for a given --config and N, the manifest carries exactly one {id, trial, transcript} entry per
+    (non-dropped scenario, trial), with trials 1..N and distinct transcript paths under the projects dir;
+  - a --drop scenario is dropped and logged on stderr, and is absent from the manifest — never faked into
+    a run;
+  - the manifest entries are exactly the {id, trial, transcript} shape the scorer consumes;
+  - the config is part of a trial's identity: the same (scenario, trial) under two configs predicts two
+    different transcript paths, so runs under different configs cannot collide;
+  - a malformed corpus, an unknown --drop id, and --trials < 1 each fail clean (rc 2, no traceback).
+"""
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+
+TOOL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run-scenarios")
+
+_checks = []
+
+
+def check(name, ok, detail=""):
+    _checks.append(bool(ok))
+    print("  %s %s%s" % ("PASS" if ok else "FAIL", name, ("  — " + str(detail)) if detail and not ok else ""))
+
+
+def write_jsonl(path, records):
+    with open(path, "w", encoding="utf-8") as fh:
+        for r in records:
+            fh.write(r if isinstance(r, str) else json.dumps(r))
+            fh.write("\n")
+
+
+def run(args):
+    return subprocess.run([sys.executable, TOOL, *args], capture_output=True, text=True)
+
+
+def read_jsonl(path):
+    out = []
+    with open(path, encoding="utf-8") as fh:
+        for raw in fh:
+            raw = raw.strip()
+            if raw:
+                out.append(json.loads(raw))
+    return out
+
+
+def main():
+    root = tempfile.mkdtemp(prefix="runscen-selftest-")
+    try:
+        proj = os.path.join(root, "projects")
+        cwd = "/work/somewhere"
+        corpus = os.path.join(root, "corpus.jsonl")
+        write_jsonl(corpus, [
+            {"id": "s1", "skill": "compact-focus", "setup": "a", "framing": "deliberation", "should_fire": True},
+            {"id": "s2", "skill": "handoff", "setup": "b", "framing": "imperative", "should_fire": True},
+            {"id": "s3", "skill": "compact-focus", "setup": "c", "framing": "unrelated", "should_fire": False},
+        ])
+
+        out = os.path.join(root, "manifest.jsonl")
+        r = run(["--corpus", corpus, "--config", "C0", "-n", "2", "--out", out,
+                 "--dry-run", "--drop", "s2", "--projects-dir", proj, "--cwd", cwd])
+        check("driver exits 0", r.returncode == 0, r.stderr)
+        man = read_jsonl(out)
+
+        pairs = sorted((e["id"], e["trial"]) for e in man)
+        check("manifest has one entry per (non-dropped scenario, trial 1..N)",
+              pairs == [("s1", 1), ("s1", 2), ("s3", 1), ("s3", 2)], pairs)
+        check("dropped scenario absent from manifest", all(e["id"] != "s2" for e in man), man)
+        check("dropped scenario logged on stderr", "dropped (non-reproducible): s2" in r.stderr, r.stderr)
+        check("summary reports the run shape", "drove 2 scenarios x 2 trials -> 4 manifest entries" in r.stderr, r.stderr)
+
+        check("entries are exactly the scorer's {id, trial, transcript} shape",
+              all(set(e) == {"id", "trial", "transcript"} for e in man), [set(e) for e in man])
+        txs = [e["transcript"] for e in man]
+        check("transcript paths are distinct, under the projects dir, and .jsonl",
+              len(set(txs)) == len(txs) and all(t.startswith(proj) and t.endswith(".jsonl") for t in txs), txs)
+
+        # config is part of a trial's identity: same (scenario, trial), different config -> different path
+        out_c3 = os.path.join(root, "manifest_c3.jsonl")
+        run(["--corpus", corpus, "--config", "C3", "-n", "1", "--out", out_c3,
+             "--dry-run", "--projects-dir", proj, "--cwd", cwd])
+        c0_s1 = [e for e in read_jsonl(out) if e["id"] == "s1" and e["trial"] == 1][0]["transcript"]
+        c3_s1 = [e for e in read_jsonl(out_c3) if e["id"] == "s1" and e["trial"] == 1][0]["transcript"]
+        check("different configs predict different transcript paths (no cross-config collision)",
+              c0_s1 != c3_s1, (c0_s1, c3_s1))
+
+        # malformed corpus -> clean rc 2
+        bad = os.path.join(root, "bad.jsonl")
+        write_jsonl(bad, ['{"id": "x", "skill": "handoff"}'])
+        rb = run(["--corpus", bad, "--config", "C0", "--out", out, "--dry-run", "--projects-dir", proj])
+        check("malformed corpus: clean error (rc 2, no traceback)",
+              rb.returncode == 2 and "Traceback" not in rb.stderr, rb.stderr)
+
+        # unknown --drop id -> clean rc 2
+        ru = run(["--corpus", corpus, "--config", "C0", "--out", out, "--dry-run",
+                  "--drop", "nope", "--projects-dir", proj])
+        check("unknown --drop id: clean error (rc 2)", ru.returncode == 2 and "Traceback" not in ru.stderr, ru.stderr)
+
+        # --trials < 1 -> clean rc 2
+        rt = run(["--corpus", corpus, "--config", "C0", "-n", "0", "--out", out, "--dry-run", "--projects-dir", proj])
+        check("--trials < 1: clean error (rc 2)", rt.returncode == 2 and "Traceback" not in rt.stderr, rt.stderr)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    passed = sum(1 for ok in _checks if ok)
+    total = len(_checks)
+    print("\n%s: %d/%d checks passed" % ("PASS" if passed == total else "FAIL", passed, total))
+    return 0 if passed == total else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
