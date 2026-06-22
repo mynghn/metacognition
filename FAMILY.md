@@ -27,21 +27,21 @@ Ordered by **universality** — how many agent tasks the knowledge benefits. Uni
 ### Everyday — universal, ~every agent turn (warrants a Layer-1 trigger block)
 | Sibling stem | Status | Scope | Boundary |
 |---|---|---|---|
-| **context-engineering** | built (14) | what occupies the window + long-context degradation (lost-in-the-middle, context-rot, distractors) + write/select/compress/isolate | the window now |
+| **context-engineering** | built (15) | what occupies the window + long-context degradation (lost-in-the-middle, context-rot, distractors) + write/select/compress/isolate | the window now |
 | **prompt-engineering** | built (12) | composing the instruction: clarity & structure, few-shot exemplars, reasoning elicitation (CoT), output-format wording, prompt-level decomposition | wording vs the window |
 
 ### Common — whenever you build or operate an agent
 | Sibling stem | Status | Scope | Boundary |
 |---|---|---|---|
-| **agent-architectures** | planned | Control flow & orchestration — workflows vs autonomous loop, ReAct, reflection, routing, single/multi-agent, sub-agent design; absorbs loop-engineering's control envelope | control flow vs runtime *execution* (agent-runtime) |
-| **evaluation-observability** | planned | Eval-driven dev, LLM-as-judge, eval harnesses, tracing | measuring vs runtime *enforcement* (guardrails) |
-| **agent-runtime** *(alias: agent-harness / harness)* | planned | The execution layer — loop driver/runtime, tool dispatch, retries/idempotency, state & restart-survival, sandboxing, session persistence, triggers/budgets/runaway-guards | runtime *execution* vs control-flow *patterns* (architectures) & window mgmt (context) |
+| **agent-architectures** | built (11) | Control flow & orchestration — workflows vs autonomous loop, ReAct, reflection, routing, single/multi-agent, sub-agent design; absorbs loop-engineering's control envelope | control flow vs runtime *execution* (agent-runtime) |
+| **evaluation-observability** | built (12) | Eval-driven dev, LLM-as-judge, eval harnesses, tracing | measuring vs runtime *enforcement* (guardrails) |
+| **agent-runtime** *(alias: agent-harness / harness)* | built (10) | The execution layer — loop driver/runtime, tool dispatch, retries/idempotency, state & restart-survival, sandboxing, session persistence, triggers/budgets/runaway-guards | runtime *execution* vs control-flow *patterns* (architectures) & window mgmt (context) |
 
 ### Situational — only when the specific need arises (SKILL.md description-only discovery)
 | Sibling stem | Status | Scope | Boundary |
 |---|---|---|---|
 | **tool-design** | built (10) | the tool/function contract — descriptions, input/output schemas, granularity & consolidation, naming/namespacing, high-signal & token-efficient returns, error design, structured output, tool evals; absorbs structured-output | the tool contract vs instruction-wording (prompt-engineering) & what occupies the window (context-engineering); tool surface vs how tools are sequenced (architectures) |
-| **skill-design** | planned · next build | the skill abstraction (SKILL.md) — progressive disclosure / three-tier token economics, directory packaging (scripts/references/assets), in-context activation, description-as-activation-trigger, one-capability granularity, instructions-body craft; the skill vs tool vs prompt vs sub-agent boundary | description/naming/selection-among-many delegated to tool-design (shared seam, single owner); the body's instruction-wording → prompt-engineering; sub-agent design → agent-architectures |
+| **skill-design** | built (9) | the skill abstraction (SKILL.md) — progressive disclosure / three-tier token economics, directory packaging (scripts/references/assets), in-context activation, description-as-activation-trigger, one-capability granularity, instructions-body craft; the skill vs tool vs prompt vs sub-agent boundary | description/naming/selection-among-many delegated to tool-design (shared seam, single owner); the body's instruction-wording → prompt-engineering; sub-agent design → agent-architectures |
 | **memory-state** | planned | Cross-session persistence + recall — short/long-term, semantic/episodic/procedural, write/consolidation | *across windows* vs *this window* (context) |
 | **retrieval-rag** | planned | Fetch + rank external knowledge — chunking, embeddings, hybrid, rerank, contextual retrieval | *fetch* vs *place in window* (context) |
 | **guardrails-safety-security** | planned | I/O validation, prompt-injection defense, permissions/sandboxing, excessive-agency (OWASP LLM Top 10) | runtime *enforcement* vs *measurement* (eval) |
