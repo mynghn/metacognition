@@ -40,7 +40,7 @@ A sibling's entire surface is `{ template + config + description }` — never a 
 
 ## How it works
 
-**Install — wiring the framework into your agents.** For each sibling, the installer reads its `config` + the `wiring` description + the one shared adapter-body template, renders a single `SKILL.md`, and writes that byte-identical adapter into both `~/.claude/skills/<name>/` and `~/.codex/skills/<name>/`. For everyday-tier siblings it also upserts a named trigger block into the shared `AGENTS.md`. Finally it ensures the vault is a git repo root and records the vault's location where the engine will look for it. No plugin and no privileged agent — both agents consume the same Agent-Skills `SKILL.md`.
+**Install — wiring the framework into your agents.** For each sibling, the installer reads its `config` + the `wiring` description + the one shared adapter-body template, renders a single `SKILL.md`, and writes that byte-identical adapter into `~/.claude/skills/<name>/` and `~/.agents/skills/<name>/`. For everyday-tier siblings it also upserts a named trigger block into the shared `AGENTS.md`. Finally it ensures the vault is a git repo root, records the vault's location where the engine will look for it, and deploys Metacognition-owned maintenance/freshness skills. No plugin and no privileged agent — both agents consume the same Agent-Skills `SKILL.md`.
 
 **Operate — changing knowledge.** Every add / update / remove goes through the engine: it validates the entry's frontmatter, writes it into the vault, keeps the topic's `INDEX.md` slug-sorted, and records the change as exactly one commit in the vault repo's own history. Retrieval is the reverse and needs no engine — read the topic `INDEX.md`, then load only the entries that match the query.
 

@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
-"""install — deploy the Metacognition family into both agents.
+"""install — deploy the Metacognition family into agent runtimes.
 
 Renders each sibling's `SKILL.md` adapter from ONE config-parameterized body template
 (templates/skill-body.md) + the per-sibling config + its discovery description, and writes
-the SAME adapter into both `~/.claude/skills/<name>/` and `~/.codex/skills/<name>/` — no
-plugin, no privileged agent, the two providers never diverge. Replaces the chezmoi
+the SAME adapter into `~/.claude/skills/<name>/` and `~/.agents/skills/<name>/` — no plugin,
+no privileged agent, the providers never diverge. Replaces the chezmoi
 `.chezmoitemplates` single-sourcing.
 
 It does five things: render each sibling's adapter and deploy the byte-identical adapter to
-both providers; emit the tier-gated discovery wiring — the `description` into both adapters
+every runtime dir; emit the tier-gated discovery wiring — the `description` into each adapter
 always, plus, for Everyday-tier siblings only, a named trigger block upserted into the shared
 `AGENTS.md` (which both `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` symlink to; `tier` comes
 from the per-sibling config); set up the vault — ensure it is a git repo ROOT and record its
 location where the engine resolves it, so a clean clone-and-install needs no personal config; and
-deploy the family-level maintenance skill (`metacognition-maintenance`) byte-identical to both
-providers, baking its engine/policy/registry `@`-tokens absolute (it is a multi-file skill copied
-as-is, not a template-rendered adapter; no scheduler is installed — discovery is its `SKILL.md`
-description alone, so nothing runs unattended); and deploy the authored practice skills (`handoff`,
+deploy the family-level skills (`metacognition-maintenance`, `metacognition-freshness`) byte-identical
+to every runtime dir, baking their engine/policy/registry `@`-tokens absolute (they are multi-file
+skills copied as-is, not template-rendered adapters; no scheduler is installed — discovery is their
+`SKILL.md` description alone, so nothing runs unattended); and deploy the authored practice skills (`handoff`,
 `compact-focus`) under `skills/practice/<name>/` — each skill is SHARED by default (one
-`<name>/SKILL.md` deployed byte-identical to both providers) and PER-VENDOR only by exception
+`<name>/SKILL.md` deployed byte-identical to every runtime dir) and PER-VENDOR only by exception
 (`<name>/<provider>/SKILL.md`, one body per provider, when a runtime primitive forces the bodies
 apart — see `skills/practice/README.md`); `@VAULT@` baked either way, plus one shared
 provider-neutral activation block upserted into `AGENTS.md`. The body's engine/config/vault paths are baked absolute at install time,
@@ -48,6 +48,8 @@ DEFAULT_VAULT = "~/.local/share/metacognition-vault"
 PROVIDERS = (".claude", ".agents")  # both get the byte-identical adapter
 TIERS = ("everyday", "common", "situational")  # discovery-wiring gate; only `everyday` emits an AGENTS.md block
 MAINTENANCE = "metacognition-maintenance"  # the family-level maintenance skill (multi-file, token-baked)
+FRESHNESS = "metacognition-freshness"  # read-only freshness check + confirmed-update instructions
+FAMILY_SKILLS = (MAINTENANCE, FRESHNESS)
 PRACTICE_DIR = "practice"  # skills/practice/<name>/[<provider>/]SKILL.md + a shared agents.md per skill
 PROVIDER_SUBDIR = {".claude": "claude", ".agents": "codex"}  # per-vendor source subdir (when a skill diverges)
 
@@ -217,11 +219,11 @@ def record_vault_location(vault):
     return conf
 
 
-def maintenance_tokens(vault):
-    """The engine/policy/registry @-tokens the maintenance skill is baked against — all absolute at
-    install time, so a deployed copy is machine-specific while its source stays generic (the mirror of
-    how the KB adapters bake @ENGINE@/@INDEX@). `@FAMILY_REPO@` is the engine repo root (`ROOT`); the
-    vault is the one separate repo."""
+def family_tokens(vault):
+    """The engine/policy/registry @-tokens family skills are baked against — all absolute at install
+    time, so a deployed copy is machine-specific while its source stays generic (the mirror of how the
+    KB adapters bake @ENGINE@/@INDEX@). `@FAMILY_REPO@` is the engine repo root (`ROOT`); the vault is
+    the one separate repo."""
     return (
         ("@ENGINE_BIN@", os.path.join(ROOT, "engine", "kb-engine")),
         ("@CONFIG_DIR@", os.path.join(ROOT, "config")),
@@ -234,18 +236,18 @@ def maintenance_tokens(vault):
     )
 
 
-def deploy_maintenance(dest, vault):
-    """Deploy the family-level maintenance skill byte-identical to BOTH providers, baking the @-tokens
+def deploy_family_skill(dest, vault, skill):
+    """Deploy one family-level multi-file skill byte-identical to every runtime dir, baking @-tokens
     absolute. Unlike a KB sibling (one adapter rendered from a template), this is a multi-file skill
-    (SKILL.md + references/) shipped as-is with the same token substitution applied to every file. No
-    scheduler/trigger artifact is written — discovery is the SKILL.md description alone, so nothing
-    runs unattended. Unlike the additive single-file adapters, this multi-file deploy is made
-    byte-equal to source: it prunes any orphan left in its own dest dir by a prior install (a renamed/
-    removed reference), since the on-demand-load contract makes a stale references/*.md reachable."""
-    src = os.path.join(ROOT, "skills", MAINTENANCE)
+    shipped as-is with the same token substitution applied to every file. No scheduler/trigger artifact
+    is written — discovery is the SKILL.md description alone, so nothing runs unattended. Unlike the
+    additive single-file adapters, this multi-file deploy is made byte-equal to source: it prunes any
+    orphan left in its own dest dir by a prior install (a renamed/removed reference/script), since the
+    on-demand-load contract makes stale bundled files reachable."""
+    src = os.path.join(ROOT, "skills", skill)
     if not os.path.isdir(src):
-        raise SystemExit("install: maintenance skill not found at %s" % src)
-    tokens = maintenance_tokens(vault)
+        raise SystemExit("install: family skill not found at %s" % src)
+    tokens = family_tokens(vault)
     rendered = []  # (relpath, baked-content) for every file under the skill dir
     for dirpath, dirnames, filenames in os.walk(src):
         dirnames.sort()
@@ -259,12 +261,12 @@ def deploy_maintenance(dest, vault):
                 text = text.replace(token, value)
             leftover = sorted(set(re.findall(r"@[A-Z_]+@", text)))
             if leftover:  # an unbaked token would ship a broken path — fail fast, never deploy it
-                raise SystemExit("install: %s/%s has unbaked token(s) %s — add them to maintenance_tokens()"
-                                 % (MAINTENANCE, rel, ", ".join(leftover)))
+                raise SystemExit("install: %s/%s has unbaked token(s) %s — add them to family_tokens()"
+                                 % (skill, rel, ", ".join(leftover)))
             rendered.append((rel, text))
     keep = {rel for rel, _ in rendered}
     for provider in PROVIDERS:
-        base = os.path.join(dest, provider, "skills", MAINTENANCE)
+        base = os.path.join(dest, provider, "skills", skill)
         # Prune orphans first so a renamed/removed reference does not linger in the deployed
         # multi-file skill (its SKILL.md tells agents to load references on demand, so a stale
         # references/*.md is reachable). Scoped to this skill's own dir — never touches other
@@ -285,9 +287,9 @@ def deploy_maintenance(dest, vault):
                     fh.write(text)
             except OSError as err:
                 raise SystemExit("install: cannot write %s/skills/%s/%s under --dest %s — %s"
-                                 % (provider, MAINTENANCE, rel, dest, err))
+                                 % (provider, skill, rel, dest, err))
     print("install: %s -> %s  (%d files, tokens baked)"
-          % (MAINTENANCE, ", ".join("%s/skills/%s" % (pr, MAINTENANCE) for pr in PROVIDERS), len(rendered)))
+          % (skill, ", ".join("%s/skills/%s" % (pr, skill) for pr in PROVIDERS), len(rendered)))
 
 
 def siblings():
@@ -351,7 +353,7 @@ def practice_sources(sdir, name):
                          "a runtime primitive forces it)"
                          % (name, ", ".join(PROVIDER_SUBDIR[pr] for pr in present_vendor)))
     if has_shared:
-        return {pr: shared for pr in PROVIDERS}  # one body, byte-identical to every provider
+        return {pr: shared for pr in PROVIDERS}  # one body, byte-identical to every runtime dir
     missing = [PROVIDER_SUBDIR[pr] for pr in PROVIDERS if pr not in present_vendor]
     if missing:
         raise SystemExit("install: practice skill %r needs a shared SKILL.md or a SKILL.md for every "
@@ -362,8 +364,8 @@ def practice_sources(sdir, name):
 def deploy_practice_skill(dest, vault, name):
     """Deploy one authored practice skill, then upsert its single shared, provider-neutral activation
     block into the shared AGENTS.md. The body layout is resolved by practice_sources(): a SHARED
-    `<name>/SKILL.md` goes byte-identical to both providers (the default), while a PER-VENDOR skill
-    ships each provider its own `<provider>/SKILL.md` (frontmatter and body diverge by runtime — e.g.
+    `<name>/SKILL.md` goes byte-identical to every runtime dir (the default), while a PER-VENDOR skill
+    ships each runtime kind its own `<provider>/SKILL.md` (frontmatter and body diverge by runtime — e.g.
     the Codex compact-focus avoids Claude's /compact-focus-argument form). @VAULT@ is baked absolute
     either way. Single-file + additive like the KB adapters (no multi-file prune)."""
     sdir = os.path.join(ROOT, "skills", PRACTICE_DIR, name)
@@ -415,8 +417,8 @@ def install_pre_commit_hook():
 
 
 def main():
-    p = argparse.ArgumentParser(description="Install the KB family into both agents.")
-    p.add_argument("--dest", default="~", help="install prefix holding .claude/, .codex/, and the shared "
+    p = argparse.ArgumentParser(description="Install the KB family into agent runtimes.")
+    p.add_argument("--dest", default="~", help="install prefix holding .claude/, .agents/, and the shared "
                    "AGENTS.md (default: ~ — the live chezmoi-managed file; pass a sandbox for testing)")
     p.add_argument("--vault", default=DEFAULT_VAULT, help="vault repo path — baked into adapters, "
                    "git-initialised as a repo root, and recorded for the engine (default: %s)" % DEFAULT_VAULT)
@@ -438,17 +440,17 @@ def main():
     only = args.only
     if only and only.endswith("-knowledge-base"):
         only = only[: -len("-knowledge-base")]  # accept the printed skill name too
-    # The maintenance skill and the practice skills are family-level, not config siblings —
+    # The family skills and the practice skills are family-level, not config siblings —
     # `--only <one>` targets just it; a full run deploys all; a surgical `--only <sibling>` leaves
     # the family-level ones alone.
     practice = practice_skills()
     if not only:
         targets = siblings()
-    elif only == MAINTENANCE or only in practice:
+    elif only in FAMILY_SKILLS or only in practice:
         targets = []
     else:
         targets = [only]  # a sibling, or an unknown name -> render_adapter raises a clean error
-    agents_path = os.path.join(dest, "AGENTS.md")  # the shared file both providers symlink to
+    agents_path = os.path.join(dest, "AGENTS.md")  # the shared file provider front doors symlink to
     for sibling in targets:
         name, adapter, block = render_adapter(sibling, args.vault)
         for provider in PROVIDERS:
@@ -470,10 +472,11 @@ def main():
     conf = record_vault_location(vault)
     print("install: vault -> %s  (recorded in %s)" % (vault, conf))
 
-    # family-level maintenance skill: a full run or an explicit `--only metacognition-maintenance`
-    # deploys it; a surgical `--only <sibling>` does not.
-    if not only or only == MAINTENANCE:
-        deploy_maintenance(dest, vault)
+    # family-level skills: a full run or an explicit `--only <skill>` deploys them; a surgical
+    # `--only <sibling>` does not.
+    for skill in FAMILY_SKILLS:
+        if not only or only == skill:
+            deploy_family_skill(dest, vault, skill)
 
     # family-level practice skills: a full run, or an explicit `--only <practice-name>`, deploys them;
     # a surgical `--only <sibling>` / `--only metacognition-maintenance` leaves them alone.
