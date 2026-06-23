@@ -7,7 +7,7 @@ the SAME adapter into both `~/.claude/skills/<name>/` and `~/.codex/skills/<name
 plugin, no privileged agent, the two providers never diverge. Replaces the chezmoi
 `.chezmoitemplates` single-sourcing.
 
-It does four things: render each sibling's adapter and deploy the byte-identical adapter to
+It does five things: render each sibling's adapter and deploy the byte-identical adapter to
 both providers; emit the tier-gated discovery wiring — the `description` into both adapters
 always, plus, for Everyday-tier siblings only, a named trigger block upserted into the shared
 `AGENTS.md` (which both `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` symlink to; `tier` comes
@@ -16,7 +16,12 @@ location where the engine resolves it, so a clean clone-and-install needs no per
 deploy the family-level maintenance skill (`metacognition-maintenance`) byte-identical to both
 providers, baking its engine/policy/registry `@`-tokens absolute (it is a multi-file skill copied
 as-is, not a template-rendered adapter; no scheduler is installed — discovery is its `SKILL.md`
-description alone, so nothing runs unattended). The body's engine/config/vault paths are baked absolute at install time,
+description alone, so nothing runs unattended); and deploy the authored practice skills (`handoff`,
+`compact-focus`) under `skills/practice/<name>/` — each skill is SHARED by default (one
+`<name>/SKILL.md` deployed byte-identical to both providers) and PER-VENDOR only by exception
+(`<name>/<provider>/SKILL.md`, one body per provider, when a runtime primitive forces the bodies
+apart — see `skills/practice/README.md`); `@VAULT@` baked either way, plus one shared
+provider-neutral activation block upserted into `AGENTS.md`. The body's engine/config/vault paths are baked absolute at install time,
 so a rendered adapter (and the maintenance skill) is machine-specific while its source stays generic.
 
 The AGENTS.md emission is SURGICAL: it inserts-or-replaces only its own named `<tag>...</tag>`
@@ -41,6 +46,8 @@ DEFAULT_VAULT = "~/.local/share/metacognition-vault"
 PROVIDERS = (".claude", ".codex")  # both get the byte-identical adapter
 TIERS = ("everyday", "common", "situational")  # discovery-wiring gate; only `everyday` emits an AGENTS.md block
 MAINTENANCE = "metacognition-maintenance"  # the family-level maintenance skill (multi-file, token-baked)
+PRACTICE_DIR = "practice"  # skills/practice/<name>/[<provider>/]SKILL.md + a shared agents.md per skill
+PROVIDER_SUBDIR = {".claude": "claude", ".codex": "codex"}  # per-vendor source subdir (when a skill diverges)
 
 
 def parse_kv(path):
@@ -295,6 +302,92 @@ def siblings():
     return out
 
 
+def practice_skills():
+    """Practice-skill names: subdirs of skills/practice/. Each is an authored skill — a SHARED
+    <name>/SKILL.md (default) or a PER-VENDOR <provider>/SKILL.md per provider (resolved by
+    practice_sources()), plus one shared agents.md. Skips dotfiles / non-dirs so a stray entry never
+    derails the install — the mirror of siblings() over config/."""
+    base = os.path.join(ROOT, "skills", PRACTICE_DIR)
+    if not os.path.isdir(base):
+        return []
+    return [f for f in sorted(os.listdir(base))
+            if not f.startswith(".") and os.path.isdir(os.path.join(base, f))]
+
+
+def bake_vault(text, vault, where):
+    """Substitute @VAULT@ to the normalized absolute vault path, then fail fast on any leftover
+    @TOKEN@ — never ship a broken path (the practice mirror of deploy_maintenance's guard; a practice
+    body needs only @VAULT@ today)."""
+    text = text.replace("@VAULT@", os.path.abspath(os.path.expanduser(vault)))
+    leftover = sorted(set(re.findall(r"@[A-Z_]+@", text)))
+    if leftover:
+        raise SystemExit("install: %s has unbaked token(s) %s — a practice body supports only @VAULT@"
+                         % (where, ", ".join(leftover)))
+    return text
+
+
+def practice_sources(sdir, name):
+    """Resolve each provider's SKILL.md source for a practice skill. Two mutually-exclusive layouts:
+
+      - SHARED (the default): a single `<name>/SKILL.md` deployed byte-identical to every provider.
+        Use this whenever the providers do not actually diverge — most skills.
+      - PER-VENDOR (the exception): `<name>/<provider-subdir>/SKILL.md`, one body per provider. A
+        skill earns this ONLY when a runtime primitive forces the bodies apart (e.g. Codex's
+        /compact takes no focus argument, Claude's $ARGUMENTS does not exist on Codex). See
+        skills/practice/README.md for the divergence test, and the install-selftest gate that
+        snapshots each per-vendor skill's divergence so unjustified drift is caught.
+
+    A shared file AND any per-provider dir together is an authoring ambiguity, not a merge — clean
+    error. Returns {provider: source_path}."""
+    shared = os.path.join(sdir, "SKILL.md")
+    per_vendor = {pr: os.path.join(sdir, PROVIDER_SUBDIR[pr], "SKILL.md") for pr in PROVIDERS}
+    has_shared = os.path.isfile(shared)
+    present_vendor = {pr: p for pr, p in per_vendor.items() if os.path.isfile(p)}
+    if has_shared and present_vendor:
+        raise SystemExit("install: practice skill %r has BOTH a shared SKILL.md and a per-provider "
+                         "%s/SKILL.md — pick one layout (shared by default; split per-vendor only when "
+                         "a runtime primitive forces it)"
+                         % (name, ", ".join(PROVIDER_SUBDIR[pr] for pr in present_vendor)))
+    if has_shared:
+        return {pr: shared for pr in PROVIDERS}  # one body, byte-identical to every provider
+    missing = [PROVIDER_SUBDIR[pr] for pr in PROVIDERS if pr not in present_vendor]
+    if missing:
+        raise SystemExit("install: practice skill %r needs a shared SKILL.md or a SKILL.md for every "
+                         "provider — missing %s" % (name, ", ".join("%s/SKILL.md" % m for m in missing)))
+    return per_vendor
+
+
+def deploy_practice_skill(dest, vault, name):
+    """Deploy one authored practice skill, then upsert its single shared, provider-neutral activation
+    block into the shared AGENTS.md. The body layout is resolved by practice_sources(): a SHARED
+    `<name>/SKILL.md` goes byte-identical to both providers (the default), while a PER-VENDOR skill
+    ships each provider its own `<provider>/SKILL.md` (frontmatter and body diverge by runtime — e.g.
+    the Codex compact-focus avoids Claude's /compact-focus-argument form). @VAULT@ is baked absolute
+    either way. Single-file + additive like the KB adapters (no multi-file prune)."""
+    sdir = os.path.join(ROOT, "skills", PRACTICE_DIR, name)
+    sources = practice_sources(sdir, name)
+    for provider in PROVIDERS:
+        src = sources[provider]
+        text = bake_vault(open(src, encoding="utf-8").read(), vault,
+                          "practice/%s" % os.path.relpath(src, sdir))
+        target = os.path.join(dest, provider, "skills", name)
+        try:
+            os.makedirs(target, exist_ok=True)
+            with open(os.path.join(target, "SKILL.md"), "w", encoding="utf-8") as fh:
+                fh.write(text)
+        except OSError as err:
+            raise SystemExit("install: cannot write %s/skills/%s/SKILL.md under --dest %s — %s"
+                             % (provider, name, dest, err))
+    tag = None
+    agents_md = os.path.join(sdir, "agents.md")
+    if os.path.isfile(agents_md):
+        block = open(agents_md, encoding="utf-8").read().rstrip("\n")
+        tag = upsert_agents_block(os.path.join(dest, "AGENTS.md"), block)
+    print("install: %s -> %s%s"
+          % (name, ", ".join("%s/skills/%s/SKILL.md" % (pr, name) for pr in PROVIDERS),
+             ("  (AGENTS.md <%s>)" % tag) if tag else ""))
+
+
 def main():
     p = argparse.ArgumentParser(description="Install the KB family into both agents.")
     p.add_argument("--dest", default="~", help="install prefix holding .claude/, .codex/, and the shared "
@@ -313,9 +406,16 @@ def main():
     only = args.only
     if only and only.endswith("-knowledge-base"):
         only = only[: -len("-knowledge-base")]  # accept the printed skill name too
-    # The maintenance skill is family-level, not a config sibling — `--only metacognition-maintenance`
-    # targets just it; a full run deploys it too; a surgical `--only <sibling>` leaves it alone.
-    targets = [] if only == MAINTENANCE else ([only] if only else siblings())
+    # The maintenance skill and the practice skills are family-level, not config siblings —
+    # `--only <one>` targets just it; a full run deploys all; a surgical `--only <sibling>` leaves
+    # the family-level ones alone.
+    practice = practice_skills()
+    if not only:
+        targets = siblings()
+    elif only == MAINTENANCE or only in practice:
+        targets = []
+    else:
+        targets = [only]  # a sibling, or an unknown name -> render_adapter raises a clean error
     agents_path = os.path.join(dest, "AGENTS.md")  # the shared file both providers symlink to
     for sibling in targets:
         name, adapter, block = render_adapter(sibling, args.vault)
@@ -342,6 +442,11 @@ def main():
     # deploys it; a surgical `--only <sibling>` does not.
     if not only or only == MAINTENANCE:
         deploy_maintenance(dest, vault)
+
+    # family-level practice skills: a full run, or an explicit `--only <practice-name>`, deploys them;
+    # a surgical `--only <sibling>` / `--only metacognition-maintenance` leaves them alone.
+    for name in (practice if not only else ([only] if only in practice else [])):
+        deploy_practice_skill(dest, vault, name)
 
 
 if __name__ == "__main__":

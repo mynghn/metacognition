@@ -1,0 +1,24 @@
+# vendor-divergence snapshot — compact-focus
+# Content-not-position: non-blank lines unique to each provider's SKILL.md, sorted.
+# install-selftest asserts the LIVE divergence equals this snapshot; a diff here is the gate
+# firing — reconcile the bodies toward shared, or, if the new divergence is genuinely
+# runtime-forced, re-snapshot intentionally:  ./install-selftest --update-divergence
+
+## only in claude/ (6)
+- Smallest high-signal summary that still lets the work continue.
+/compact
+A finished line looks like this (content illustrative — name the real items of the session):
+Output ONLY the `/compact …` line, in a code block, ready to copy — then one sentence telling the user to paste it (you cannot run `/compact` yourself). If you surfaced this proactively rather than on request, add a short note on why now (e.g. session length, before a heavy task).
+Produce a single ready-to-paste `/compact <focus>` command line that compacts THIS conversation well. Ground it in the context-engineering knowledge base's compaction discipline — load `@VAULT@/context-engineering/knowledge/compaction-vs-eviction.md` and its siblings for the full reasoning (that KB entry is the authority, not any one session's global-instructions block).
+description: Generate a session-tailored `/compact <focus>` line so manual compaction keeps the working set and drops noise, in the context-engineering-knowledge-base spirit. Use when the user asks to compact, clear, or condense the session, before a long context-heavy task, or to hand the user a focused compaction command. The user runs /compact; you cannot.
+
+## only in codex/ (9)
+- Smallest high-signal focus that still lets the work continue.
+Output the focus as a single message the user pastes *before* compacting: a leading line `When compacting, preserve the following and drop the rest:` followed by the `Keep:` / `Verbatim:` / `Refs:` / `Drop:` blocks verbatim — then one sentence telling the user to send it and then run `/compact` (you cannot run `/compact` yourself). If you surfaced this proactively rather than on request, add a short note on why now (e.g. session length, before a heavy task). For durable behavior across many compactions, point them at `compact_prompt` / `experimental_compact_prompt_file` in `~/.codex/config.toml` instead.
+Produce a session-tailored compaction *focus* for THIS conversation. Ground it in the context-engineering knowledge base's compaction discipline — load `@VAULT@/context-engineering/knowledge/compaction-vs-eviction.md` and its siblings for the full reasoning (that KB entry is the authority, not any one session's global-instructions block). Codex's `/compact` does not reliably take a focus argument, so the focus rides in a normal message the user sends *before* running `/compact` — never as an argument on the `/compact` line itself.
+The complete paste-able message looks like this (content illustrative — name the real items of the session):
+When compacting, preserve the following and drop the rest:
+compatibility: Designed for Codex
+description: Generate a session-tailored compaction focus so manual compaction keeps the working set and drops noise, in the context-engineering-knowledge-base spirit. Use when the user asks to compact, clear, or condense the session, before a long context-heavy task, or to hand the user a focused compaction directive. The user runs /compact; you cannot.
+metadata:
+short-description: Produce a focused session compaction directive
