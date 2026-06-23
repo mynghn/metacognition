@@ -17,9 +17,11 @@ deploy the family-level maintenance skill (`metacognition-maintenance`) byte-ide
 providers, baking its engine/policy/registry `@`-tokens absolute (it is a multi-file skill copied
 as-is, not a template-rendered adapter; no scheduler is installed — discovery is its `SKILL.md`
 description alone, so nothing runs unattended); and deploy the authored practice skills (`handoff`,
-`compact-focus`) under `skills/practice/<name>/<provider>/` — each provider its own `SKILL.md`
-(frontmatter and body diverge by runtime), `@VAULT@` baked, plus one shared provider-neutral
-activation block upserted into `AGENTS.md`. The body's engine/config/vault paths are baked absolute at install time,
+`compact-focus`) under `skills/practice/<name>/` — each skill is SHARED by default (one
+`<name>/SKILL.md` deployed byte-identical to both providers) and PER-VENDOR only by exception
+(`<name>/<provider>/SKILL.md`, one body per provider, when a runtime primitive forces the bodies
+apart — see `skills/practice/README.md`); `@VAULT@` baked either way, plus one shared
+provider-neutral activation block upserted into `AGENTS.md`. The body's engine/config/vault paths are baked absolute at install time,
 so a rendered adapter (and the maintenance skill) is machine-specific while its source stays generic.
 
 The AGENTS.md emission is SURGICAL: it inserts-or-replaces only its own named `<tag>...</tag>`
@@ -44,8 +46,8 @@ DEFAULT_VAULT = "~/.local/share/metacognition-vault"
 PROVIDERS = (".claude", ".codex")  # both get the byte-identical adapter
 TIERS = ("everyday", "common", "situational")  # discovery-wiring gate; only `everyday` emits an AGENTS.md block
 MAINTENANCE = "metacognition-maintenance"  # the family-level maintenance skill (multi-file, token-baked)
-PRACTICE_DIR = "practice"  # skills/practice/<name>/<provider>/SKILL.md + a shared agents.md per skill
-PROVIDER_SUBDIR = {".claude": "claude", ".codex": "codex"}  # per-provider source subdir per practice skill
+PRACTICE_DIR = "practice"  # skills/practice/<name>/[<provider>/]SKILL.md + a shared agents.md per skill
+PROVIDER_SUBDIR = {".claude": "claude", ".codex": "codex"}  # per-vendor source subdir (when a skill diverges)
 
 
 def parse_kv(path):
@@ -301,9 +303,10 @@ def siblings():
 
 
 def practice_skills():
-    """Practice-skill names: subdirs of skills/practice/. Each is an authored, per-provider skill
-    (a <provider>/SKILL.md per provider + one shared agents.md). Skips dotfiles / non-dirs so a stray
-    entry never derails the install — the mirror of siblings() over config/."""
+    """Practice-skill names: subdirs of skills/practice/. Each is an authored skill — a SHARED
+    <name>/SKILL.md (default) or a PER-VENDOR <provider>/SKILL.md per provider (resolved by
+    practice_sources()), plus one shared agents.md. Skips dotfiles / non-dirs so a stray entry never
+    derails the install — the mirror of siblings() over config/."""
     base = os.path.join(ROOT, "skills", PRACTICE_DIR)
     if not os.path.isdir(base):
         return []
@@ -323,19 +326,50 @@ def bake_vault(text, vault, where):
     return text
 
 
+def practice_sources(sdir, name):
+    """Resolve each provider's SKILL.md source for a practice skill. Two mutually-exclusive layouts:
+
+      - SHARED (the default): a single `<name>/SKILL.md` deployed byte-identical to every provider.
+        Use this whenever the providers do not actually diverge — most skills.
+      - PER-VENDOR (the exception): `<name>/<provider-subdir>/SKILL.md`, one body per provider. A
+        skill earns this ONLY when a runtime primitive forces the bodies apart (e.g. Codex's
+        /compact takes no focus argument, Claude's $ARGUMENTS does not exist on Codex). See
+        skills/practice/README.md for the divergence test, and the install-selftest gate that
+        snapshots each per-vendor skill's divergence so unjustified drift is caught.
+
+    A shared file AND any per-provider dir together is an authoring ambiguity, not a merge — clean
+    error. Returns {provider: source_path}."""
+    shared = os.path.join(sdir, "SKILL.md")
+    per_vendor = {pr: os.path.join(sdir, PROVIDER_SUBDIR[pr], "SKILL.md") for pr in PROVIDERS}
+    has_shared = os.path.isfile(shared)
+    present_vendor = {pr: p for pr, p in per_vendor.items() if os.path.isfile(p)}
+    if has_shared and present_vendor:
+        raise SystemExit("install: practice skill %r has BOTH a shared SKILL.md and a per-provider "
+                         "%s/SKILL.md — pick one layout (shared by default; split per-vendor only when "
+                         "a runtime primitive forces it)"
+                         % (name, ", ".join(PROVIDER_SUBDIR[pr] for pr in present_vendor)))
+    if has_shared:
+        return {pr: shared for pr in PROVIDERS}  # one body, byte-identical to every provider
+    missing = [PROVIDER_SUBDIR[pr] for pr in PROVIDERS if pr not in present_vendor]
+    if missing:
+        raise SystemExit("install: practice skill %r needs a shared SKILL.md or a SKILL.md for every "
+                         "provider — missing %s" % (name, ", ".join("%s/SKILL.md" % m for m in missing)))
+    return per_vendor
+
+
 def deploy_practice_skill(dest, vault, name):
-    """Deploy one authored practice skill: each provider gets its OWN per-provider SKILL.md
-    (frontmatter and body diverge by runtime — e.g. the Codex compact-focus avoids Claude's
-    /compact-focus-argument form), @VAULT@ baked absolute; then the single shared, provider-neutral
-    activation block is upserted into the shared AGENTS.md. Single-file + additive like the KB
-    adapters (no multi-file prune)."""
+    """Deploy one authored practice skill, then upsert its single shared, provider-neutral activation
+    block into the shared AGENTS.md. The body layout is resolved by practice_sources(): a SHARED
+    `<name>/SKILL.md` goes byte-identical to both providers (the default), while a PER-VENDOR skill
+    ships each provider its own `<provider>/SKILL.md` (frontmatter and body diverge by runtime — e.g.
+    the Codex compact-focus avoids Claude's /compact-focus-argument form). @VAULT@ is baked absolute
+    either way. Single-file + additive like the KB adapters (no multi-file prune)."""
     sdir = os.path.join(ROOT, "skills", PRACTICE_DIR, name)
+    sources = practice_sources(sdir, name)
     for provider in PROVIDERS:
-        sub = PROVIDER_SUBDIR[provider]
-        src = os.path.join(sdir, sub, "SKILL.md")
-        if not os.path.isfile(src):
-            raise SystemExit("install: practice skill %r is missing %s/SKILL.md" % (name, sub))
-        text = bake_vault(open(src, encoding="utf-8").read(), vault, "practice/%s/%s/SKILL.md" % (name, sub))
+        src = sources[provider]
+        text = bake_vault(open(src, encoding="utf-8").read(), vault,
+                          "practice/%s" % os.path.relpath(src, sdir))
         target = os.path.join(dest, provider, "skills", name)
         try:
             os.makedirs(target, exist_ok=True)

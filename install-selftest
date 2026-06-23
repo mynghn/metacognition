@@ -21,11 +21,19 @@ Maintenance skill (W6): a full install deploys the family-level metacognition-ma
 extra (scheduler/trigger) artifact so nothing runs unattended, is idempotent, deploys via `--only metacognition-maintenance`
 yet is left untouched by a surgical `--only <sibling>`, and a file with an unbakeable @TOKEN@ is a clean error.
 
-Practice-skill lane: a full install deploys the authored practice skills (handoff, compact-focus) per-provider
-(each provider its own SKILL.md from claude/ or codex/, @VAULT@ baked) plus a shared provider-neutral activation block
-upserted into AGENTS.md; set-keyed discovery picks up a new skills/practice/<x>/ dir with no code change; the Codex bodies
-carry no $ARGUMENTS; the activation upsert is surgical + idempotent; `--only <practice>` deploys just it; a surgical
-`--only <sibling>` leaves them alone; and an unbakeable @TOKEN@ is a clean error.
+Practice-skill lane: a full install deploys the authored practice skills (handoff, compact-focus). The lane is
+SHARED-by-default (one <name>/SKILL.md byte-identical to both providers) and PER-VENDOR by exception
+(<name>/<provider>/SKILL.md when a runtime primitive forces the bodies apart), @VAULT@ baked either way, plus a shared
+provider-neutral activation block upserted into AGENTS.md. Covered here: a shared SKILL.md reaches both providers
+byte-identical; per-vendor bodies reach their own runtime; a shared + per-provider layout together is a clean error;
+set-keyed discovery picks up a new skills/practice/<x>/ dir with no code change; the activation upsert is surgical +
+idempotent; `--only <practice>` deploys just it; a surgical `--only <sibling>` leaves them alone; and an unbakeable
+@TOKEN@ is a clean error.
+
+Vendor-divergence gate: each per-vendor skill ships a golden `vendor-divergence` snapshot (content-not-position — the
+sorted set of provider-unique lines). The gate asserts the live divergence equals the snapshot, so gratuitous drift or
+a reconcile-toward-shared both fail until the snapshot is intentionally regenerated (`./install-selftest
+--update-divergence`); a semantic check forbids any Claude-only primitive ($ARGUMENTS, `/compact <focus>`) in a Codex body.
 """
 import os
 import re
@@ -38,6 +46,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 INSTALL = os.path.join(ROOT, "install")
 CONFIG = os.path.join(ROOT, "config")
 ENGINE = os.path.join(ROOT, "engine", "kb-engine")
+PRACTICE_SRC = os.path.join(ROOT, "skills", "practice")
 NAMES = ["context-engineering-knowledge-base", "prompt-engineering-knowledge-base", "tool-design-knowledge-base"]
 _ok = []
 _VAULT = None  # sandbox vault, set in main(); injected into every install run so the real vault is untouched
@@ -58,7 +67,81 @@ def read(dest, provider, name):
     return open(os.path.join(dest, provider, "skills", name, "SKILL.md"), encoding="utf-8").read()
 
 
+# ---- vendor-divergence gate ---------------------------------------------------------------------
+# A per-vendor practice skill (a claude/ AND a codex/ body) earns its split only when a runtime
+# primitive forces the bodies apart. The gate freezes the SANCTIONED divergence as a golden snapshot
+# so unjustified drift — gratuitous wording differences, or a Claude-only primitive leaking into the
+# Codex body — fails the selftest. "Content-not-position" so a pure reorder of a shared line never
+# trips it; only the SET of provider-unique lines matters. See skills/practice/README.md.
+
+def _divergent_lines(text):
+    """Non-blank, stripped lines — the unit the gate compares (CONTENT, not whitespace or position)."""
+    return [ln.strip() for ln in text.splitlines() if ln.strip()]
+
+
+def per_vendor_skills():
+    """Practice skills shipped PER-VENDOR (a claude/ AND a codex/ SKILL.md) — the ones the gate
+    governs. A shared-body skill (one <name>/SKILL.md) has no divergence and is skipped."""
+    if not os.path.isdir(PRACTICE_SRC):
+        return []
+    out = []
+    for f in sorted(os.listdir(PRACTICE_SRC)):
+        d = os.path.join(PRACTICE_SRC, f)
+        if f.startswith(".") or not os.path.isdir(d):
+            continue
+        if os.path.isfile(os.path.join(d, "claude", "SKILL.md")) and os.path.isfile(os.path.join(d, "codex", "SKILL.md")):
+            out.append(f)
+    return out
+
+
+def render_divergence(name, only_claude, only_codex):
+    """Serialize a per-vendor skill's content-not-position divergence to golden-snapshot text: the
+    sorted sets of lines unique to each provider, under a self-documenting (re)generation header."""
+    lines = [
+        "# vendor-divergence snapshot — %s" % name,
+        "# Content-not-position: non-blank lines unique to each provider's SKILL.md, sorted.",
+        "# install-selftest asserts the LIVE divergence equals this snapshot; a diff here is the gate",
+        "# firing — reconcile the bodies toward shared, or, if the new divergence is genuinely",
+        "# runtime-forced, re-snapshot intentionally:  ./install-selftest --update-divergence",
+        "",
+        "## only in claude/ (%d)" % len(only_claude),
+    ]
+    lines += only_claude
+    lines += ["", "## only in codex/ (%d)" % len(only_codex)]
+    lines += only_codex
+    return "\n".join(lines) + "\n"
+
+
+def practice_divergence(name):
+    """The LIVE content-not-position divergence between a per-vendor skill's two provider SKILL.md files,
+    rendered as golden-snapshot text. Position-insensitive (reordering a shared line is invisible)
+    but content-sensitive (any new/removed provider-unique line registers)."""
+    d = os.path.join(PRACTICE_SRC, name)
+    cset = set(_divergent_lines(open(os.path.join(d, "claude", "SKILL.md"), encoding="utf-8").read()))
+    xset = set(_divergent_lines(open(os.path.join(d, "codex", "SKILL.md"), encoding="utf-8").read()))
+    return render_divergence(name, sorted(cset - xset), sorted(xset - cset))
+
+
+def divergence_snapshot_path(name):
+    return os.path.join(PRACTICE_SRC, name, "vendor-divergence")
+
+
+def update_divergence_snapshots():
+    """Regenerate every per-vendor skill's golden divergence snapshot from current sources — the
+    deliberate, documented way to move the gate after an intentional divergence change."""
+    names = per_vendor_skills()
+    for name in names:
+        with open(divergence_snapshot_path(name), "w", encoding="utf-8") as fh:
+            fh.write(practice_divergence(name))
+        print("updated %s" % divergence_snapshot_path(name))
+    if not names:
+        print("no per-vendor practice skills found — nothing to snapshot")
+    return 0
+
+
 def main():
+    if "--update-divergence" in sys.argv:
+        return update_divergence_snapshots()
     global _VAULT
     sb = tempfile.mkdtemp(prefix="kb-install-sb-")
     os.environ["XDG_CONFIG_HOME"] = os.path.join(sb, "xdg")  # sandbox the engine<->installer config file
@@ -191,9 +274,11 @@ def main():
                       os.path.isfile(c) and read(d_ps, ".claude", name) == baked(csrc))
                 check("practice %s: Codex deploy == codex/ source (baked)" % name,
                       os.path.isfile(x) and read(d_ps, ".codex", name) == baked(xsrc))
-            # the Codex bodies carry no Claude-only $ARGUMENTS substitution
-            check("practice: no $ARGUMENTS in any Codex body",
-                  all("$ARGUMENTS" not in read(d_ps, ".codex", n) for n in PRACTICE))
+            # semantic per-runtime gate: a Codex body carries no Claude-only primitive — neither the
+            # $ARGUMENTS substitution nor a `/compact <focus>` argument form Codex's /compact rejects
+            check("practice gate: no $ARGUMENTS or '/compact <focus>' in any Codex body",
+                  all("$ARGUMENTS" not in read(d_ps, ".codex", n) and "/compact <focus>" not in read(d_ps, ".codex", n)
+                      for n in PRACTICE))
             # @VAULT@ baked: no leftover @TOKEN@ in any deployed body; the baked path is present
             allp = "".join(read(d_ps, pr, n) for n in PRACTICE for pr in (".claude", ".codex"))
             check("practice: @VAULT@ baked, no leftover @TOKEN@", not re.search(r"@[A-Z_]+@", allp),
@@ -212,6 +297,54 @@ def main():
                   open(os.path.join(d_ps, "AGENTS.md"), encoding="utf-8").read() == agp)
         finally:
             shutil.rmtree(d_ps, ignore_errors=True)
+
+        # divergence gate: every per-vendor skill's LIVE divergence equals its committed golden
+        # snapshot — drift in EITHER direction (gratuitous growth, or a reconciled shrink) fails,
+        # forcing a conscious reconcile-toward-shared or re-snapshot. Runs over the real source tree
+        # BEFORE any temp probe skill is created below, so it governs only the shipped per-vendor set.
+        pv = per_vendor_skills()
+        check("practice gate: per-vendor set is exactly {handoff, compact-focus}",
+              pv == ["compact-focus", "handoff"], "%s" % pv)
+        for name in pv:
+            gp = divergence_snapshot_path(name)
+            golden = open(gp, encoding="utf-8").read() if os.path.isfile(gp) else None
+            check("practice gate: %s divergence == golden snapshot" % name,
+                  golden is not None and practice_divergence(name) == golden,
+                  "missing/stale skills/practice/%s/vendor-divergence — ./install-selftest --update-divergence" % name)
+
+        # shared-body lane: a single <name>/SKILL.md (no provider dirs) deploys byte-identical to both
+        shared = os.path.join(psrc, "_selftest_shared")
+        os.makedirs(shared)
+        open(os.path.join(shared, "SKILL.md"), "w").write(
+            "---\nname: _selftest_shared\ndescription: shared probe\n---\n\nshared body resolving @VAULT@\n")
+        open(os.path.join(shared, "agents.md"), "w").write("<_selftest_shared>\nshared trigger\n</_selftest_shared>\n")
+        d_sh = tempfile.mkdtemp(prefix="kb-install-")
+        try:
+            r = run(["--dest", d_sh, "--only", "_selftest_shared"])
+            cok = os.path.isfile(os.path.join(d_sh, ".claude", "skills", "_selftest_shared", "SKILL.md"))
+            xok = os.path.isfile(os.path.join(d_sh, ".codex", "skills", "_selftest_shared", "SKILL.md"))
+            check("practice shared-body: one SKILL.md deploys byte-identical to both providers (@VAULT@ baked)",
+                  r.returncode == 0 and cok and xok
+                  and read(d_sh, ".claude", "_selftest_shared") == read(d_sh, ".codex", "_selftest_shared")
+                  and os.path.abspath(_VAULT) in read(d_sh, ".claude", "_selftest_shared"), r.stderr)
+        finally:
+            shutil.rmtree(d_sh, ignore_errors=True)
+            shutil.rmtree(shared, ignore_errors=True)
+
+        # ambiguous layout: a shared SKILL.md AND a per-provider dir together -> clean error
+        amb = os.path.join(psrc, "_selftest_ambig")
+        os.makedirs(os.path.join(amb, "claude"))
+        open(os.path.join(amb, "SKILL.md"), "w").write("---\nname: x\ndescription: y\n---\n\nshared\n")
+        open(os.path.join(amb, "claude", "SKILL.md"), "w").write("---\nname: x\ndescription: y\n---\n\nclaude\n")
+        open(os.path.join(amb, "agents.md"), "w").write("<x>\nt\n</x>\n")
+        d_amb = tempfile.mkdtemp(prefix="kb-install-")
+        try:
+            rb = run(["--dest", d_amb, "--only", "_selftest_ambig"])
+            check("practice ambiguous layout (shared + per-provider) -> clean error",
+                  rb.returncode != 0 and "pick one layout" in rb.stderr and "Traceback" not in rb.stderr, rb.stderr)
+        finally:
+            shutil.rmtree(d_amb, ignore_errors=True)
+            shutil.rmtree(amb, ignore_errors=True)
 
         # set-keyed: a NEW skills/practice/<x>/ dir deploys with no install code change
         probe = os.path.join(psrc, "_selftest_probe")

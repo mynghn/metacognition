@@ -1,0 +1,23 @@
+# vendor-divergence snapshot — handoff
+# Content-not-position: non-blank lines unique to each provider's SKILL.md, sorted.
+# install-selftest asserts the LIVE divergence equals this snapshot; a diff here is the gate
+# firing — reconcile the bodies toward shared, or, if the new divergence is genuinely
+# runtime-forced, re-snapshot intentionally:  ./install-selftest --update-divergence
+
+## only in claude/ (6)
+**First, decide whether to hand off at all — settle this before building anything.** The new goal is the organizing input: if `$ARGUMENTS` names it, use it; otherwise ask for it (selection is meaningless without a destination). Then gate on whether a fresh frame beats staying — hand off only if execution needs a cold load this session lacks, the session has rotted, or it is a clean explore→execute boundary. If the "new goal" is really "keep doing the same thing," or everything the goal needs is already warm and near-continuous, say so, recommend staying / `/compact-focus`, and stop — don't manufacture a handoff. Otherwise, build the brief.
+@scratchpad/handoff-<topic>.md — <one-sentence action to start>
+Kickoff — paste into the fresh session (brief at the front, action at the end):
+Then emit a ready-to-paste fresh-session kickoff: `@`-mention the brief (material) at the FRONT, the action/instruction at the END (recency); JIT the bulk — never `@`-dump heavy refs (lost-in-the-middle, prefix-cache-economics).
+argument-hint: "<the new goal the fresh session will pursue>"
+description: Generate a goal-scoped handoff brief (+ a fresh-session kickoff line) so work crosses a session boundary cleanly, in the context-engineering-knowledge-base spirit. Use at an explore→execute / plan→impl boundary, after a major pivot, or when a long session should depart for an explicit NEW goal in a fresh context. Distinct from /compact-focus, which leans the SAME session in place.
+
+## only in codex/ (8)
+**First, decide whether to hand off at all — settle this before building anything.** The new goal is the organizing input: infer it from the user's request, or ask for it (selection is meaningless without a destination). Then gate on whether a fresh frame beats staying — hand off only if execution needs a cold load this session lacks, the session has rotted, or it is a clean explore→execute boundary. If the "new goal" is really "keep doing the same thing," or everything the goal needs is already warm and near-continuous, say so, recommend staying / the `compact-focus` skill, and stop — don't manufacture a handoff. Otherwise, build the brief.
+Kickoff — paste into the fresh session (brief path at the front, action at the end):
+Then emit a ready-to-paste fresh-session kickoff: reference the brief file by its PATH at the FRONT (material), the action/instruction at the END (recency); load heavy refs just-in-time rather than pasting them inline (lost-in-the-middle, prefix-cache-economics).
+compatibility: Designed for Codex
+description: Generate a goal-scoped handoff brief (+ a fresh-session kickoff line) so work crosses a session boundary cleanly, in the context-engineering-knowledge-base spirit. Use at an explore→execute / plan→impl boundary, after a major pivot, or when a long session should depart for an explicit NEW goal in a fresh context. Distinct from compact-focus, which leans the SAME session in place.
+metadata:
+scratchpad/handoff-<topic>.md — <one-sentence action to start>
+short-description: Emit a goal-scoped fresh-session handoff
