@@ -1,31 +1,17 @@
 #!/usr/bin/env bash
 # metacognition-freshness — read-only freshness + validity of the Metacognition
-# framework: the tooling repo + the private vault repo (vs their remotes), and
+# framework: the tooling repo + the vault repo (vs their remotes), and
 # whether installed Claude+Codex adapters cover every configured sibling.
 set -uo pipefail
 
 TOOL="@FAMILY_REPO@"
 VAULT="@VAULT@"
 
-# The vault is private + mynghn-owned; the active gh account may not be able to
-# reach it, so read-only fetches use a mynghn credential when available.
-MTOK="$(gh auth token --user mynghn 2>/dev/null || true)"
-mynghn_git() {
-  local repo="$1"
-  shift
-  if [ -n "$MTOK" ]; then
-    MYNGHN_TOKEN="$MTOK" git -C "$repo" -c credential.helper= \
-      -c credential.helper='!f(){ echo username=mynghn; echo "password=$MYNGHN_TOKEN"; };f' "$@"
-  else
-    git -C "$repo" "$@"
-  fi
-}
-
 sync_state() {
   local repo="$1" br up d
   [ -n "$(git -C "$repo" status --porcelain 2>/dev/null)" ] && d=dirty || d=clean
   br="$(git -C "$repo" symbolic-ref --short HEAD 2>/dev/null || echo HEAD)"
-  mynghn_git "$repo" fetch -q origin 2>/dev/null || true
+  git -C "$repo" fetch -q origin 2>/dev/null || true
   up="origin/$br"
   git -C "$repo" rev-parse --verify -q "$up" >/dev/null 2>&1 || up="origin/HEAD"
   printf '%s behind=%s ahead=%s' "$d" \
@@ -89,4 +75,3 @@ echo "Fix (after review, only if flagged **):"
 echo "  git -C $TOOL pull --ff-only \\"
 echo "    && git -C $VAULT pull --ff-only \\"
 echo "    && $TOOL/install --vault $VAULT"
-echo "  (vault is private + mynghn-owned: fetch/pull/push may need the mynghn gh-credential override — see SKILL.md)"
