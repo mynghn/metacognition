@@ -37,4 +37,4 @@ The gate proves itself on the live failure: applied to `concise-not-compressed`,
 ## Upstream
 
 - Originating handoff — `docs/plans/kb-capture-merit-gate-handoff.md` (the merit-gate-vs-form-gate framing and the load-bearing constraints).
-- First test case — vault entry `concise-not-compressed` (vault commit `a0de939`, currently local-only / unpushed): the worked instance the gate must catch; reconcile into `literal-vs-latent-matching` or re-source, don't push as-is.
+- First test case — vault entry `concise-not-compressed` on the pushed branch `context-engineering/concise-not-compressed` (vault commit `a0de939`, on origin): the worked instance the gate must catch; reconcile into `literal-vs-latent-matching` or re-source, and supersede the branch (delete it on origin once reconciled) rather than merging it as-is (`UnderstandingShifts#Delta-1-test-case-candidate-is-a-pushed-branch`).

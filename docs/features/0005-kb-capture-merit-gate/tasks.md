@@ -3,7 +3,7 @@
 ## Guidelines
 - **Two repos.** Skill, installer, and template work lands in `metacognition` (this round's branch); the test-case reconciliation lands in `metacognition-vault`. The engine stays the sole vault writer — route every vault mutation through `kb-engine`, never hand-edit an entry or INDEX.
 - **Dual-adapter parity.** Every change ships byte-identical to Claude and Codex through the installer; `install-selftest` parity must pass before close-out.
-- **Self-applying acceptance.** The gate must catch `concise-not-compressed` (orthogonality overlap + headline authority). That entry is local-only (vault commit `a0de939`) and must be reconciled, never pushed as-is.
+- **Self-applying acceptance.** The gate must catch `concise-not-compressed` (orthogonality overlap + headline authority). That entry is on the pushed branch `context-engineering/concise-not-compressed` (vault commit `a0de939`, on origin) and must be reconciled and the branch superseded — deleted on origin once reconciled — never merged as-is (`UnderstandingShifts#Delta-1-test-case-candidate-is-a-pushed-branch`).
 
 ## Dependency DAG
 
@@ -20,14 +20,19 @@ flowchart LR
       V1
       V2
     end
+    subgraph D [Dogfood]
+      D1
+    end
     S1 --> I1
     S1 --> I2
     I1 --> I2
     S1 --> V1
     V1 --> V2
+    I2 --> D1
+    V2 --> D1
 ```
 
-Tracks: **S** authors the gate skill, **I** ships it and routes capture through it, **V** proves it on the live failure and cleans up that entry.
+Tracks: **S** authors the gate skill, **I** ships it and routes capture through it, **V** proves it on the live failure and reconciles that entry, **D** dogfoods the *deployed* gate end-to-end on the real branch candidate and cleans up the origin branch.
 
 ## T: S1
 
@@ -69,9 +74,19 @@ Tracks: **S** authors the gate skill, **I** ships it and routes capture through 
 
 ## T: V2
 
-- **Goal**: Reconcile the `concise-not-compressed` test-case entry per the gate's verdict — fold it into `literal-vs-latent-matching` as a refresh (or re-source if genuinely kept), never push as-is (the self-applying acceptance Guideline; the orthogonality outcome of `Spec#B-2-orthogonality-classifies-new-refresh-reject`).
+- **Goal**: Reconcile the `concise-not-compressed` test-case entry per the gate's verdict — fold its salvageable content into `literal-vs-latent-matching` as a refresh (or re-source if genuinely kept), superseding the pushed branch rather than merging it as-is (the self-applying acceptance Guideline; the orthogonality outcome of `Spec#B-2-orthogonality-classifies-new-refresh-reject`; `UnderstandingShifts#Delta-1-test-case-candidate-is-a-pushed-branch`).
 - **Repo**: `metacognition-vault`
 - **Completion**:
   - the vault no longer carries `concise-not-compressed` as a standalone un-orthogonal entry — it is refreshed into `literal-vs-latent-matching` (or re-sourced), written via `kb-engine` (engine = sole writer);
-  - nothing is pushed as-is; the local-only commit `a0de939` is superseded/reconciled, not pushed.
+  - the branch `context-engineering/concise-not-compressed` (commit `a0de939`) is reconciled, not merged verbatim — its content is folded in or re-sourced (the branch's own deletion on origin is D1's branch-hygiene step).
 - **Dependencies**: V1 (the gate's verdict informs the reconciliation).
+
+## T: D1
+
+- **Goal**: Dogfood the gate end-to-end on the real branch candidate as the round's integrated acceptance — drive the *deployed* skill (not the source files) the way a real capture happens, routed from a KB sibling's Capture section, on `concise-not-compressed` from the pushed branch, exercising assess → maintainer-decide → engine-write in one pass (`Spec#C-1-every-create-or-update-is-gated`, `Spec#C-2-writes-only-through-the-engine`; the self-applying acceptance Guideline; `UnderstandingShifts#Delta-1-test-case-candidate-is-a-pushed-branch`). This proves the shipped + routed gate works, beyond V1/V2's checks on the authored skill, and finishes branch hygiene.
+- **Repo**: `metacognition` (drives the deployed gate; acts on `metacognition-vault` + its origin)
+- **Completion**:
+  - the gate **as deployed** to `~/.claude` + `~/.codex` and **as routed** from a KB sibling (post-I2), invoked on the branch candidate, reproduces V1's two flags before any write — orthogonality overlap with `literal-vs-latent-matching` and the headline-authority flag (`Spec#B-2-orthogonality-classifies-new-refresh-reject`, `Spec#B-3-authority-mapped-per-claim`, `Spec#C-1-every-create-or-update-is-gated`);
+  - the reconciliation (V2) is recorded in the vault only through `kb-engine` and its commit carries the gate's `Capture-verdict` trailer — no direct vault write (`Spec#C-2-writes-only-through-the-engine`);
+  - branch hygiene is complete: `context-engineering/concise-not-compressed` is deleted on origin once reconciled, leaving nothing dangling.
+- **Dependencies**: I2 (the deployed, routed gate exists), V2 (the entry is reconciled, so the branch can be retired).
