@@ -52,6 +52,7 @@ CONFIG = os.path.join(ROOT, "config")
 ENGINE = os.path.join(ROOT, "engine", "kb-engine")
 PRACTICE_SRC = os.path.join(ROOT, "skills", "practice")
 NAMES = ["context-engineering-knowledge-base", "prompt-engineering-knowledge-base", "tool-design-knowledge-base"]
+RUNTIME_DIRS = (".claude", ".agents")
 _ok = []
 _VAULT = None  # sandbox vault, set in main(); injected into every install run so the real vault is untouched
 
@@ -188,9 +189,10 @@ def main():
             return open(os.path.join(d, provider, "skills", MAINT, rel), encoding="utf-8").read()
 
         deployed_both = all(os.path.isfile(os.path.join(dest, pr, "skills", MAINT, rel))
-                            for rel in MFILES for pr in (".claude", ".agents"))
-        check("maintenance: every file deployed to both providers, byte-identical",
-              deployed_both and all(mread(dest, ".claude", rel) == mread(dest, ".agents", rel) for rel in MFILES),
+                            for rel in MFILES for pr in RUNTIME_DIRS)
+        check("maintenance: every file deployed to runtime dirs, byte-identical",
+              deployed_both and all(mread(dest, ".claude", rel) == mread(dest, pr, rel)
+                                    for rel in MFILES for pr in RUNTIME_DIRS),
               "files=%s" % MFILES)
         all_text = "".join(mread(dest, ".claude", rel) for rel in MFILES)
         check("maintenance: no unbaked @TOKEN@ remains in any deployed file",
@@ -207,10 +209,10 @@ def main():
         def shipped_set(provider):
             sd = os.path.join(dest, provider, "skills", MAINT)
             return sorted(os.path.relpath(os.path.join(dp, f), sd) for dp, _, fs in os.walk(sd) for f in fs)
-        check("maintenance: both providers ship only SKILL.md + references (no scheduler/auto-trigger artifact)",
-              shipped_set(".claude") == MFILES and shipped_set(".agents") == MFILES
+        check("maintenance: runtime dirs ship only SKILL.md + references (no scheduler/auto-trigger artifact)",
+              all(shipped_set(pr) == MFILES for pr in RUNTIME_DIRS)
               and any(f.startswith("references/") for f in MFILES) and "SKILL.md" in MFILES,
-              "%s / %s" % (shipped_set(".claude"), shipped_set(".agents")))
+              "%s" % {pr: shipped_set(pr) for pr in RUNTIME_DIRS})
         # the maintenance frontmatter is shipped as-is (not rendered+quoted like KB adapters) — guard
         # that it stays valid+discoverable: name + description present, and an UNQUOTED description has
         # no ': ' colon-space (strict-invalid YAML that would silently break discovery).
@@ -267,6 +269,37 @@ def main():
         finally:
             os.remove(bogus)
             shutil.rmtree(d_bog, ignore_errors=True)
+
+        # ---- family-level freshness skill: token-baked multi-file deploy + bundled check script ----
+        FRESH = "metacognition-freshness"
+        fsrc = os.path.join(ROOT, "skills", FRESH)
+        FFILES = sorted(os.path.relpath(os.path.join(dp, f), fsrc)
+                        for dp, _, fs in os.walk(fsrc) for f in fs if not f.startswith("."))
+
+        def fread(d, provider, rel):
+            return open(os.path.join(d, provider, "skills", FRESH, rel), encoding="utf-8").read()
+
+        deployed_fresh = all(os.path.isfile(os.path.join(dest, pr, "skills", FRESH, rel))
+                             for rel in FFILES for pr in RUNTIME_DIRS)
+        check("freshness: every file deployed to runtime dirs, byte-identical",
+              deployed_fresh and all(fread(dest, ".claude", rel) == fread(dest, pr, rel)
+                                     for rel in FFILES for pr in RUNTIME_DIRS),
+              "files=%s" % FFILES)
+        all_fresh = "".join(fread(dest, ".claude", rel) for rel in FFILES)
+        check("freshness: no unbaked @TOKEN@ remains in any deployed file",
+              not re.search(r"@[A-Z_]+@", all_fresh), re.findall(r"@[A-Z_]+@", all_fresh)[:5])
+        check("freshness: repo and vault paths baked into deployed files",
+              ROOT in all_fresh and os.path.abspath(_VAULT) in all_fresh,
+              "missing ROOT/vault")
+        d_f = tempfile.mkdtemp(prefix="kb-install-")
+        try:
+            rf = run(["--dest", d_f, "--only", FRESH])
+            sdir = os.path.join(d_f, ".claude", "skills")
+            present = sorted(os.listdir(sdir)) if os.path.isdir(sdir) else []
+            check("--only freshness: deploys just the freshness skill",
+                  rf.returncode == 0 and present == [FRESH], "%s / %s" % (rf.stderr.strip(), present))
+        finally:
+            shutil.rmtree(d_f, ignore_errors=True)
 
         # ---- practice-skill lane: per-provider SKILL.md + provider-neutral activation ----
         PRACTICE = ["handoff", "compact-focus"]
