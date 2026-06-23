@@ -301,7 +301,7 @@ def main():
                  "--scope", "a probe scope", "--description", "A probe description for the g3 selftest."] + common)
         name = "selftest-g3-knowledge-base"
         c = os.path.join(dest, ".claude", "skills", name, "SKILL.md")
-        x = os.path.join(dest, ".codex", "skills", name, "SKILL.md")
+        x = os.path.join(dest, ".agents", "skills", name, "SKILL.md")
         check("G3: one run emits both adapters", r.returncode == 0 and os.path.isfile(c) and os.path.isfile(x), (r.stdout + r.stderr))
         check("G3: Claude adapter == Codex adapter (byte-identical)",
               os.path.isfile(c) and os.path.isfile(x) and open(c, encoding="utf-8").read() == open(x, encoding="utf-8").read())
