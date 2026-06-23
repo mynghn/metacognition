@@ -170,9 +170,9 @@ def main():
         check("install exits 0", r.returncode == 0, r.stderr)
         for n in NAMES:
             c = os.path.join(dest, ".claude", "skills", n, "SKILL.md")
-            x = os.path.join(dest, ".codex", "skills", n, "SKILL.md")
+            x = os.path.join(dest, ".agents", "skills", n, "SKILL.md")
             check("%s: Claude == Codex" % n,
-                  os.path.isfile(c) and os.path.isfile(x) and read(dest, ".claude", n) == read(dest, ".codex", n))
+                  os.path.isfile(c) and os.path.isfile(x) and read(dest, ".claude", n) == read(dest, ".agents", n))
 
         snap = {n: read(dest, ".claude", n) for n in NAMES}
         run(["--dest", dest])
@@ -188,9 +188,9 @@ def main():
             return open(os.path.join(d, provider, "skills", MAINT, rel), encoding="utf-8").read()
 
         deployed_both = all(os.path.isfile(os.path.join(dest, pr, "skills", MAINT, rel))
-                            for rel in MFILES for pr in (".claude", ".codex"))
+                            for rel in MFILES for pr in (".claude", ".agents"))
         check("maintenance: every file deployed to both providers, byte-identical",
-              deployed_both and all(mread(dest, ".claude", rel) == mread(dest, ".codex", rel) for rel in MFILES),
+              deployed_both and all(mread(dest, ".claude", rel) == mread(dest, ".agents", rel) for rel in MFILES),
               "files=%s" % MFILES)
         all_text = "".join(mread(dest, ".claude", rel) for rel in MFILES)
         check("maintenance: no unbaked @TOKEN@ remains in any deployed file",
@@ -208,9 +208,9 @@ def main():
             sd = os.path.join(dest, provider, "skills", MAINT)
             return sorted(os.path.relpath(os.path.join(dp, f), sd) for dp, _, fs in os.walk(sd) for f in fs)
         check("maintenance: both providers ship only SKILL.md + references (no scheduler/auto-trigger artifact)",
-              shipped_set(".claude") == MFILES and shipped_set(".codex") == MFILES
+              shipped_set(".claude") == MFILES and shipped_set(".agents") == MFILES
               and any(f.startswith("references/") for f in MFILES) and "SKILL.md" in MFILES,
-              "%s / %s" % (shipped_set(".claude"), shipped_set(".codex")))
+              "%s / %s" % (shipped_set(".claude"), shipped_set(".agents")))
         # the maintenance frontmatter is shipped as-is (not rendered+quoted like KB adapters) — guard
         # that it stays valid+discoverable: name + description present, and an UNQUOTED description has
         # no ': ' colon-space (strict-invalid YAML that would silently break discovery).
@@ -281,7 +281,7 @@ def main():
             check("practice: install exits 0", r.returncode == 0, r.stderr)
             for name in PRACTICE:
                 c = os.path.join(d_ps, ".claude", "skills", name, "SKILL.md")
-                x = os.path.join(d_ps, ".codex", "skills", name, "SKILL.md")
+                x = os.path.join(d_ps, ".agents", "skills", name, "SKILL.md")
                 check("practice %s: deployed to both providers" % name, os.path.isfile(c) and os.path.isfile(x))
                 # each provider gets ITS OWN per-provider body, == its source with @VAULT@ baked
                 csrc = open(os.path.join(psrc, name, "claude", "SKILL.md"), encoding="utf-8").read()
@@ -289,14 +289,14 @@ def main():
                 check("practice %s: Claude deploy == claude/ source (baked)" % name,
                       os.path.isfile(c) and read(d_ps, ".claude", name) == baked(csrc))
                 check("practice %s: Codex deploy == codex/ source (baked)" % name,
-                      os.path.isfile(x) and read(d_ps, ".codex", name) == baked(xsrc))
+                      os.path.isfile(x) and read(d_ps, ".agents", name) == baked(xsrc))
             # semantic per-runtime gate: a Codex body carries no Claude-only primitive — neither the
             # $ARGUMENTS substitution nor a `/compact <focus>` argument form Codex's /compact rejects
             check("practice gate: no $ARGUMENTS or '/compact <focus>' in any Codex body",
-                  all("$ARGUMENTS" not in read(d_ps, ".codex", n) and "/compact <focus>" not in read(d_ps, ".codex", n)
+                  all("$ARGUMENTS" not in read(d_ps, ".agents", n) and "/compact <focus>" not in read(d_ps, ".agents", n)
                       for n in PRACTICE))
             # @VAULT@ baked: no leftover @TOKEN@ in any deployed body; the baked path is present
-            allp = "".join(read(d_ps, pr, n) for n in PRACTICE for pr in (".claude", ".codex"))
+            allp = "".join(read(d_ps, pr, n) for n in PRACTICE for pr in (".claude", ".agents"))
             check("practice: @VAULT@ baked, no leftover @TOKEN@", not re.search(r"@[A-Z_]+@", allp),
                   re.findall(r"@[A-Z_]+@", allp)[:5])
             check("practice: baked vault path present in a deployed body", os.path.abspath(_VAULT) in allp)
@@ -338,10 +338,10 @@ def main():
         try:
             r = run(["--dest", d_sh, "--only", "_selftest_shared"])
             cok = os.path.isfile(os.path.join(d_sh, ".claude", "skills", "_selftest_shared", "SKILL.md"))
-            xok = os.path.isfile(os.path.join(d_sh, ".codex", "skills", "_selftest_shared", "SKILL.md"))
+            xok = os.path.isfile(os.path.join(d_sh, ".agents", "skills", "_selftest_shared", "SKILL.md"))
             check("practice shared-body: one SKILL.md deploys byte-identical to both providers (@VAULT@ baked)",
                   r.returncode == 0 and cok and xok
-                  and read(d_sh, ".claude", "_selftest_shared") == read(d_sh, ".codex", "_selftest_shared")
+                  and read(d_sh, ".claude", "_selftest_shared") == read(d_sh, ".agents", "_selftest_shared")
                   and os.path.abspath(_VAULT) in read(d_sh, ".claude", "_selftest_shared"), r.stderr)
         finally:
             shutil.rmtree(d_sh, ignore_errors=True)
@@ -375,7 +375,7 @@ def main():
             check("practice set-keyed: a new dir deploys with no code change",
                   r.returncode == 0
                   and os.path.isfile(os.path.join(d_set, ".claude", "skills", "_selftest_probe", "SKILL.md"))
-                  and os.path.isfile(os.path.join(d_set, ".codex", "skills", "_selftest_probe", "SKILL.md")), r.stderr)
+                  and os.path.isfile(os.path.join(d_set, ".agents", "skills", "_selftest_probe", "SKILL.md")), r.stderr)
         finally:
             shutil.rmtree(d_set, ignore_errors=True)
             shutil.rmtree(probe, ignore_errors=True)
