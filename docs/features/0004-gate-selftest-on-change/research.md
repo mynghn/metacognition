@@ -7,9 +7,9 @@
 
 ## Current Selftest Surface
 
-- `install-selftest` includes installer, maintenance-skill, practice-skill, and vendor-divergence checks.
-- `install-selftest --update-divergence` regenerates the committed `skills/practice/<name>/vendor-divergence` snapshots for per-vendor practice skills.
-- Other selftest entry points present at the repository root include `maintenance-selftest`, `no-net-loss-selftest`, `generate-selftest`, `health-check-selftest`, and `engine/selftest`.
+- `scripts/install-selftest` includes installer, maintenance-skill, practice-skill, and vendor-divergence checks.
+- `scripts/install-selftest --update-divergence` regenerates the committed `skills/practice/<name>/vendor-divergence` snapshots for per-vendor practice skills.
+- Other selftest entry points include `scripts/maintenance-selftest`, `scripts/no-net-loss-selftest`, `scripts/generate-selftest`, `scripts/health-check-selftest`, and `engine/selftest`.
 
 ## GitHub Actions Semantics
 

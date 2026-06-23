@@ -23,7 +23,8 @@ import subprocess
 import sys
 import tempfile
 
-NNL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "no-net-loss")
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+NNL = os.path.join(SCRIPT_DIR, "no-net-loss")
 _checks = []
 
 
