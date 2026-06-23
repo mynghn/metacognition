@@ -178,6 +178,13 @@ def main():
             x = os.path.join(dest, ".codex", "skills", n, "SKILL.md")
             check("%s: Claude == Codex" % n,
                   os.path.isfile(c) and os.path.isfile(x) and read(dest, ".claude", n) == read(dest, ".codex", n))
+            # Every KB create/update is gated: a rendered sibling routes capture/refresh through the
+            # metacognition-capture front door and never invokes the engine's write path directly, so
+            # re-introducing a direct `kb-engine capture|refresh` into the shared body fails here.
+            body = read(dest, ".claude", n)
+            check("%s: capture/refresh routes through the gate (no direct engine write)" % n,
+                  not re.search(r"kb-engine\s+(?:capture|refresh)", body) and "metacognition-capture" in body,
+                  body[:200])
 
         snap = {n: read(dest, ".claude", n) for n in NAMES}
         run(["--dest", dest])
