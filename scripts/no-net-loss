@@ -31,7 +31,8 @@ import os
 import re
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "engine"))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "engine"))
 import sources  # shared: split_frontmatter, load_bearing_numbers, _field-style frontmatter reads
 
 PROG = "no-net-loss"

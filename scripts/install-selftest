@@ -32,7 +32,7 @@ idempotent; `--only <practice>` deploys just it; a surgical `--only <sibling>` l
 
 Vendor-divergence gate: each per-vendor skill ships a golden `vendor-divergence` snapshot (content-not-position — the
 sorted set of provider-unique lines). The gate asserts the live divergence equals the snapshot, so gratuitous drift or
-a reconcile-toward-shared both fail until the snapshot is intentionally regenerated (`./install-selftest
+a reconcile-toward-shared both fail until the snapshot is intentionally regenerated (`./scripts/install-selftest
 --update-divergence`); a semantic check forbids any Claude-only primitive ($ARGUMENTS, `/compact <focus>`) in a Codex body.
 
 Local hook setup: the main installer exposes the selftest gate's pre-commit hook as opt-in setup UX. Non-interactive
@@ -45,8 +45,9 @@ import subprocess
 import sys
 import tempfile
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
-INSTALL = os.path.join(ROOT, "install")
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(SCRIPT_DIR)
+INSTALL = os.path.join(SCRIPT_DIR, "install")
 CONFIG = os.path.join(ROOT, "config")
 ENGINE = os.path.join(ROOT, "engine", "kb-engine")
 PRACTICE_SRC = os.path.join(ROOT, "skills", "practice")
@@ -79,7 +80,7 @@ def copy_install_repo(dest):
     subprocess.run(["git", "-C", dest, "init", "-q"], check=True)
     subprocess.run(["git", "-C", dest, "config", "user.email", "selftest@example.com"], check=True)
     subprocess.run(["git", "-C", dest, "config", "user.name", "selftest"], check=True)
-    return os.path.join(dest, "install")
+    return os.path.join(dest, "scripts", "install")
 
 
 # ---- vendor-divergence gate ---------------------------------------------------------------------
@@ -117,7 +118,7 @@ def render_divergence(name, only_claude, only_codex):
         "# Content-not-position: non-blank lines unique to each provider's SKILL.md, sorted.",
         "# install-selftest asserts the LIVE divergence equals this snapshot; a diff here is the gate",
         "# firing — reconcile the bodies toward shared, or, if the new divergence is genuinely",
-        "# runtime-forced, re-snapshot intentionally:  ./install-selftest --update-divergence",
+        "# runtime-forced, re-snapshot intentionally:  ./scripts/install-selftest --update-divergence",
         "",
         "## only in claude/ (%d)" % len(only_claude),
     ]
@@ -198,7 +199,7 @@ def main():
         # no-leftover-raw-token check above cannot — it only catches an UNsubstituted one).
         expected_vals = [os.path.join(ROOT, "engine", "kb-engine"), os.path.join(ROOT, "config"),
                          os.path.abspath(_VAULT), os.path.join(ROOT, "SOURCES.md"),
-                         os.path.join(ROOT, "health-check"), os.path.join(ROOT, "no-net-loss"),
+                         os.path.join(ROOT, "scripts", "health-check"), os.path.join(ROOT, "scripts", "no-net-loss"),
                          os.path.join(ROOT, "FAMILY.md"), ROOT]
         check("maintenance: every @-token baked to its real absolute path",
               all(v in all_text for v in expected_vals), str([v for v in expected_vals if v not in all_text]))
@@ -325,7 +326,7 @@ def main():
             golden = open(gp, encoding="utf-8").read() if os.path.isfile(gp) else None
             check("practice gate: %s divergence == golden snapshot" % name,
                   golden is not None and practice_divergence(name) == golden,
-                  "missing/stale skills/practice/%s/vendor-divergence — ./install-selftest --update-divergence" % name)
+                  "missing/stale skills/practice/%s/vendor-divergence — ./scripts/install-selftest --update-divergence" % name)
 
         # shared-body lane: a single <name>/SKILL.md (no provider dirs) deploys byte-identical to both
         shared = os.path.join(psrc, "_selftest_shared")
@@ -700,9 +701,11 @@ def main():
         check("pre-commit setup: non-interactive install skips by default",
               r.returncode == 0 and not os.path.exists(hook) and "not installed" in r.stdout, r.stderr)
         r = run_hook_install(["--install-pre-commit"])
+        hook_text = open(hook, encoding="utf-8").read() if os.path.isfile(hook) else ""
         check("pre-commit setup: explicit flag installs the managed hook",
               r.returncode == 0 and os.path.isfile(hook) and os.access(hook, os.X_OK)
-              and "metacognition selftest-gate sentinel" in open(hook, encoding="utf-8").read(), r.stderr)
+              and "metacognition selftest-gate sentinel" in hook_text
+              and "rev-parse --local-env-vars" in hook_text, r.stderr)
 
         hook_root_existing = os.path.join(sb, "hook-install-existing")
         hook_install_existing = copy_install_repo(hook_root_existing)
@@ -721,7 +724,8 @@ def main():
               r.returncode == 0 and os.path.isfile(preserved)
               and open(preserved, encoding="utf-8").read() == original_hook
               and "pre-commit.metacognition-existing" in wrapper
-              and "metacognition selftest-gate sentinel" in wrapper, r.stderr)
+              and "metacognition selftest-gate sentinel" in wrapper
+              and "rev-parse --local-env-vars" in wrapper, r.stderr)
     finally:
         shutil.rmtree(dest, ignore_errors=True)
         shutil.rmtree(sb, ignore_errors=True)

@@ -4,7 +4,7 @@
 
 Use a source-controlled runner instead of duplicating raw shell commands in CI and the local hook. The core force is drift: the moment CI and a hook carry separate command lists, one can stop representing the actual gate while still looking plausible in review.
 
-The rejected alternatives were a workflow-only command list and calling `install-selftest` directly. Workflow-only leaves no reusable local guard. Calling only `install-selftest` misses the other existing selftest entry points recorded in Research. The fixed suite is intentionally blunt: it spends seconds to buy a single verdict surface and avoids premature per-path test selection. If the suite later becomes slow enough to harm routine review, split profiles inside `selftest-gate` while preserving the same CLI as the stable call point.
+The rejected alternatives were a workflow-only command list and calling `scripts/install-selftest` directly. Workflow-only leaves no reusable local guard. Calling only `scripts/install-selftest` misses the other existing selftest entry points recorded in Research. The fixed suite is intentionally blunt: it spends seconds to buy a single verdict surface and avoids premature per-path test selection. If the suite later becomes slow enough to harm routine review, split profiles inside `selftest-gate` while preserving the same CLI as the stable call point.
 
 ## D-2: github-actions-authoritative-gate
 

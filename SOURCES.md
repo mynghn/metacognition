@@ -3,7 +3,7 @@
 What counts as an authoritative source for a vault entry. This file is **policy, not
 mechanism**: the prose below is the human-ratifiable bar; the fenced `hosts` block is the
 machine-parseable allowlist the [`engine/`](engine) write-gate and the
-[`health-check`](health-check) source-lint both read (one parser, so the bar a write must
+[`scripts/health-check`](scripts/health-check) source-lint both read (one parser, so the bar a write must
 clear is exactly the bar detection flags against). SOURCES.md is itself a living artifact —
 evolve it through the same propose→ratify path as any vault change, never a silent edit.
 

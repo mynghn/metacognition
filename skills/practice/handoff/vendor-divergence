@@ -2,7 +2,7 @@
 # Content-not-position: non-blank lines unique to each provider's SKILL.md, sorted.
 # install-selftest asserts the LIVE divergence equals this snapshot; a diff here is the gate
 # firing — reconcile the bodies toward shared, or, if the new divergence is genuinely
-# runtime-forced, re-snapshot intentionally:  ./install-selftest --update-divergence
+# runtime-forced, re-snapshot intentionally:  ./scripts/install-selftest --update-divergence
 
 ## only in claude/ (6)
 **First, decide whether to hand off at all — settle this before building anything.** The new goal is the organizing input: if `$ARGUMENTS` names it, use it; otherwise ask for it (selection is meaningless without a destination). Then gate on whether a fresh frame beats staying — hand off only if execution needs a cold load this session lacks, the session has rotted, or it is a clean explore→execute boundary. If the "new goal" is really "keep doing the same thing," or everything the goal needs is already warm and near-continuous, say so, recommend staying / `/compact-focus`, and stop — don't manufacture a handoff. Otherwise, build the brief.

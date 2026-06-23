@@ -30,8 +30,9 @@ import subprocess
 import sys
 import tempfile
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
-GEN = os.path.join(ROOT, "generate")
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(SCRIPT_DIR)
+GEN = os.path.join(SCRIPT_DIR, "generate")
 CONFIG = os.path.join(ROOT, "config")
 ENGINE = os.path.join(ROOT, "engine", "kb-engine")
 SHIPPED_INDEX = os.path.join(os.path.dirname(ROOT), "metacognition-vault", "context-engineering", "INDEX.md")

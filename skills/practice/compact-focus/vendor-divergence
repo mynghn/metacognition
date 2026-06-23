@@ -2,7 +2,7 @@
 # Content-not-position: non-blank lines unique to each provider's SKILL.md, sorted.
 # install-selftest asserts the LIVE divergence equals this snapshot; a diff here is the gate
 # firing — reconcile the bodies toward shared, or, if the new divergence is genuinely
-# runtime-forced, re-snapshot intentionally:  ./install-selftest --update-divergence
+# runtime-forced, re-snapshot intentionally:  ./scripts/install-selftest --update-divergence
 
 ## only in claude/ (6)
 - Smallest high-signal summary that still lets the work continue.

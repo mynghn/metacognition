@@ -27,11 +27,11 @@ import sys
 import urllib.error
 import urllib.request
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "engine"))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "engine"))
 import sources  # shared SOURCES.md policy logic — one parser for the write-gate and this lint
 
 PROG = "health-check"
-ROOT = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_VOLATILITY = 365
 _FULL_URL_RE = re.compile(r"https?://[^\s)\"'>\]]+", re.I)
 

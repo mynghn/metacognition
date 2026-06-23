@@ -1,0 +1,490 @@
+#!/usr/bin/env python3
+"""install — deploy the Metacognition family into both agents.
+
+Renders each sibling's `SKILL.md` adapter from ONE config-parameterized body template
+(templates/skill-body.md) + the per-sibling config + its discovery description, and writes
+the SAME adapter into both `~/.claude/skills/<name>/` and `~/.codex/skills/<name>/` — no
+plugin, no privileged agent, the two providers never diverge. Replaces the chezmoi
+`.chezmoitemplates` single-sourcing.
+
+It does five things: render each sibling's adapter and deploy the byte-identical adapter to
+both providers; emit the tier-gated discovery wiring — the `description` into both adapters
+always, plus, for Everyday-tier siblings only, a named trigger block upserted into the shared
+`AGENTS.md` (which both `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` symlink to; `tier` comes
+from the per-sibling config); set up the vault — ensure it is a git repo ROOT and record its
+location where the engine resolves it, so a clean clone-and-install needs no personal config; and
+deploy the family-level maintenance skill (`metacognition-maintenance`) byte-identical to both
+providers, baking its engine/policy/registry `@`-tokens absolute (it is a multi-file skill copied
+as-is, not a template-rendered adapter; no scheduler is installed — discovery is its `SKILL.md`
+description alone, so nothing runs unattended); and deploy the authored practice skills (`handoff`,
+`compact-focus`) under `skills/practice/<name>/` — each skill is SHARED by default (one
+`<name>/SKILL.md` deployed byte-identical to both providers) and PER-VENDOR only by exception
+(`<name>/<provider>/SKILL.md`, one body per provider, when a runtime primitive forces the bodies
+apart — see `skills/practice/README.md`); `@VAULT@` baked either way, plus one shared
+provider-neutral activation block upserted into `AGENTS.md`. The body's engine/config/vault paths are baked absolute at install time,
+so a rendered adapter (and the maintenance skill) is machine-specific while its source stays generic.
+
+The AGENTS.md emission is SURGICAL: it inserts-or-replaces only its own named `<tag>...</tag>`
+span and leaves every other block (the user's operating instructions) byte-for-byte untouched,
+idempotent on re-run — it never rewrites the file. With the default `--dest ~` the shared file is
+the live `~/AGENTS.md`, which on a personal machine stays chezmoi-managed — so test against a
+`--dest <sandbox>`, not the live file. The vault setup likewise writes a live file —
+`$XDG_CONFIG_HOME/metacognition/vault` (the real `~/.config` when XDG is unset) — and git-inits
+`--vault`; these are gated by `$XDG_CONFIG_HOME` / `--vault`, NOT `--dest`, so testing must
+sandbox ALL THREE (`--dest`, `$XDG_CONFIG_HOME`, and a sandbox `--vault`).
+
+The install is ADDITIVE: it writes/overwrites the current siblings' adapters but does not prune
+adapters for removed/renamed siblings — retiring a stale adapter is a manual cutover step.
+"""
+import argparse
+import os
+import re
+import subprocess
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SCRIPTS = os.path.join(ROOT, "scripts")
+DEFAULT_VAULT = "~/.local/share/metacognition-vault"
+PROVIDERS = (".claude", ".codex")  # both get the byte-identical adapter
+TIERS = ("everyday", "common", "situational")  # discovery-wiring gate; only `everyday` emits an AGENTS.md block
+MAINTENANCE = "metacognition-maintenance"  # the family-level maintenance skill (multi-file, token-baked)
+PRACTICE_DIR = "practice"  # skills/practice/<name>/[<provider>/]SKILL.md + a shared agents.md per skill
+PROVIDER_SUBDIR = {".claude": "claude", ".codex": "codex"}  # per-vendor source subdir (when a skill diverges)
+
+
+def parse_kv(path):
+    cfg = {}
+    with open(path, encoding="utf-8") as fh:
+        for raw in fh:
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            cfg[k.strip()] = v.strip()
+    return cfg
+
+
+def title_of(stem):
+    return " ".join(w.capitalize() for w in stem.split("-")) + " Knowledge Base"
+
+
+def noun_of(index_heading):
+    h = index_heading.lower()
+    return h[:-1] if h.endswith("s") else h
+
+
+def render_adapter(sibling, vault):
+    cfg_path = os.path.join(ROOT, "config", sibling)
+    if not os.path.isfile(cfg_path):
+        raise SystemExit("install: unknown sibling %r — known: %s" % (sibling, ", ".join(siblings()) or "(none)"))
+    cfg = parse_kv(cfg_path)
+    for required in ("stem", "index_heading"):
+        if not cfg.get(required):
+            raise SystemExit("install: config/%s missing required field %r" % (sibling, required))
+    stem = cfg["stem"]
+    wiring_path = os.path.join(ROOT, "wiring", sibling)
+    wiring = parse_kv(wiring_path) if os.path.isfile(wiring_path) else {}
+    description = wiring.get("description") or cfg.get("description")
+    if not description:
+        raise SystemExit("install: no discovery description for %r — add `description = ...` to wiring/%s"
+                         % (sibling, sibling))
+    topic_dir = os.path.join(os.path.expanduser(vault), stem)
+    engine_cmd = "%s --config %s" % (os.path.join(ROOT, "engine", "kb-engine"),
+                                     os.path.join(ROOT, "config", sibling))
+    body = open(os.path.join(ROOT, "templates", "skill-body.md"), encoding="utf-8").read()
+    for token, value in (
+        ("@TITLE@", title_of(stem)),
+        ("@TOPIC@", stem),
+        ("@NOUN@", noun_of(cfg["index_heading"])),
+        ("@INDEX@", os.path.join(topic_dir, "INDEX.md")),
+        ("@KNOWLEDGE@", os.path.join(topic_dir, "knowledge", "<slug>.md")),
+        ("@ENGINE@", engine_cmd),
+    ):
+        body = body.replace(token, value)
+    name = stem + "-knowledge-base"
+    # The description is free-form prose — em-dashes, colons, apostrophes, and the generator's
+    # [DRAFT:]/[AUTHOR:] markers — so it MUST be a quoted YAML scalar; an unquoted ': ' is
+    # strict-invalid YAML. Double-quote with \ and " escaped (valid for any single-line value).
+    desc = '"%s"' % description.replace("\\", "\\\\").replace('"', '\\"')
+    adapter = "---\nname: %s\ndescription: %s\n---\n\n%s" % (name, desc, body)
+    tier = (cfg.get("tier") or "").strip().lower()
+    if tier not in TIERS:
+        raise SystemExit("install: config/%s has tier %r — must be one of %s (a typo silently "
+                         "drops an Everyday trigger)" % (sibling, cfg.get("tier", ""), ", ".join(TIERS)))
+    block = agents_block(sibling, stem) if tier == "everyday" else None
+    if tier == "everyday" and block is None:
+        raise SystemExit("install: %r is tier=everyday but has no trigger block — "
+                         "add wiring/%s.agents.md" % (sibling, sibling))
+    return name, adapter, block
+
+
+def agents_block(sibling, stem):
+    """The named `AGENTS.md` trigger block for an Everyday-tier sibling, or None.
+
+    The block body is single-sourced in `wiring/<sibling>.agents.md`; the tag is the
+    stem with hyphens as underscores. Wrapping the body in its tag here keeps the tag
+    single-sourced from the stem — the mirror of how render_adapter wraps the adapter
+    body in its frontmatter. The body must not embed its own closing
+    tag (the installer adds it), and is normalised to exactly one trailing newline so the
+    wrap is insensitive to the body file's trailing-newline shape."""
+    path = os.path.join(ROOT, "wiring", sibling + ".agents.md")
+    if not os.path.isfile(path):
+        return None
+    body = open(path, encoding="utf-8").read()
+    tag = stem.replace("-", "_")
+    close = "</%s>" % tag
+    if close in body:
+        raise SystemExit("install: wiring/%s.agents.md must not contain its own closing tag %r "
+                         "— the installer adds it" % (sibling, close))
+    body = body.rstrip("\n") + "\n"
+    return "<%s>\n%s%s" % (tag, body, close)
+
+
+def upsert_agents_block(agents_path, block):
+    """Insert-or-replace one named `<tag>...</tag>` block in the shared AGENTS.md and
+    return the tag. Surgical and idempotent: replaces the block in place when already
+    present (never disturbing the surrounding operating instructions), appends it at
+    EOF when absent, and writes only if the content actually changes.
+
+    The tag is matched only as a FULL LINE (`^<tag>$` … `^</tag>$`), so a bare mention of
+    the tag inside another block's prose can neither serve as a false open boundary (which
+    would swallow the neighbour) nor as a false close. AGENTS.md is treated as LF-only,
+    consistent with the engine."""
+    tag = block[1:block.index(">")]
+    try:
+        existing = open(agents_path, encoding="utf-8").read() if os.path.isfile(agents_path) else ""
+    except OSError as err:
+        raise SystemExit("install: cannot read AGENTS.md at %s — %s" % (agents_path, err))
+    pat = re.compile(r"^<%s>$.*?^</%s>$" % (re.escape(tag), re.escape(tag)), re.DOTALL | re.MULTILINE)
+    if pat.search(existing):
+        updated = pat.sub(lambda m: block, existing)  # lambda → block is literal, not a regex template
+    else:
+        updated = (existing.rstrip("\n") + "\n\n" if existing else "") + block + "\n"
+    if updated != existing:
+        try:
+            with open(agents_path, "w", encoding="utf-8") as fh:
+                fh.write(updated)
+        except OSError as err:
+            raise SystemExit("install: cannot write AGENTS.md at %s — %s" % (agents_path, err))
+    return tag
+
+
+def config_home():
+    """The XDG config base — matched to the engine's own resolution so the location file the
+    installer writes is the one the engine reads (their contract). Honours $XDG_CONFIG_HOME so a
+    sandboxed install records to the sandbox, not the real ~/.config."""
+    return os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+
+
+def ensure_vault_repo(vault):
+    """Make the vault a git repo ROOT and return its absolute path. Creates the directory and
+    `git init`s it when absent — or when it sits INSIDE another repo (which would let a mutation
+    commit into that enclosing repo, the exact leak the engine refuses); a no-op when
+    it is already its own repo root, so a freshly-cloned vault is left untouched. Idempotent."""
+    if not vault or not vault.strip():
+        raise SystemExit("install: --vault must not be empty")
+    vault = os.path.abspath(os.path.expanduser(vault))
+    if os.path.isfile(vault):
+        raise SystemExit("install: vault path is a file, not a directory: %s" % vault)
+    try:
+        os.makedirs(vault, exist_ok=True)
+    except OSError as err:  # a dangling symlink in the way, an unwritable parent, …
+        raise SystemExit("install: cannot create the vault directory %s — %s" % (vault, err))
+    top = subprocess.run(["git", "-C", vault, "rev-parse", "--show-toplevel"],
+                         capture_output=True, text=True)
+    if top.returncode == 0 and os.path.realpath(top.stdout.strip()) == os.path.realpath(vault):
+        return vault  # already its own repo root (e.g. a clone) — leave it alone
+    r = subprocess.run(["git", "-C", vault, "init", "-q"], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise SystemExit("install: could not git-init the vault at %s — %s"
+                         % (vault, r.stderr.strip() or "git init failed"))
+    return vault
+
+
+def record_vault_location(vault):
+    """Write the engine<->installer contract file: the vault's absolute path
+    at $XDG_CONFIG_HOME/metacognition/vault, so the engine resolves the vault with no
+    --vault/env on a clean install. Writes only on change. Returns the file path."""
+    conf = os.path.join(config_home(), "metacognition", "vault")
+    content = os.path.abspath(os.path.expanduser(vault)) + "\n"
+    if not (os.path.isfile(conf) and open(conf, encoding="utf-8").read() == content):
+        try:
+            os.makedirs(os.path.dirname(conf), exist_ok=True)
+            with open(conf, "w", encoding="utf-8") as fh:
+                fh.write(content)
+        except OSError as err:
+            raise SystemExit("install: cannot record the vault location at %s — %s" % (conf, err))
+    return conf
+
+
+def maintenance_tokens(vault):
+    """The engine/policy/registry @-tokens the maintenance skill is baked against — all absolute at
+    install time, so a deployed copy is machine-specific while its source stays generic (the mirror of
+    how the KB adapters bake @ENGINE@/@INDEX@). `@FAMILY_REPO@` is the engine repo root (`ROOT`); the
+    vault is the one separate repo."""
+    return (
+        ("@ENGINE_BIN@", os.path.join(ROOT, "engine", "kb-engine")),
+        ("@CONFIG_DIR@", os.path.join(ROOT, "config")),
+        ("@VAULT@", os.path.abspath(os.path.expanduser(vault))),
+        ("@SOURCES@", os.path.join(ROOT, "SOURCES.md")),
+        ("@HEALTH_CHECK@", os.path.join(SCRIPTS, "health-check")),
+        ("@NO_NET_LOSS@", os.path.join(SCRIPTS, "no-net-loss")),
+        ("@FAMILY@", os.path.join(ROOT, "FAMILY.md")),
+        ("@FAMILY_REPO@", ROOT),
+    )
+
+
+def deploy_maintenance(dest, vault):
+    """Deploy the family-level maintenance skill byte-identical to BOTH providers, baking the @-tokens
+    absolute. Unlike a KB sibling (one adapter rendered from a template), this is a multi-file skill
+    (SKILL.md + references/) shipped as-is with the same token substitution applied to every file. No
+    scheduler/trigger artifact is written — discovery is the SKILL.md description alone, so nothing
+    runs unattended. Unlike the additive single-file adapters, this multi-file deploy is made
+    byte-equal to source: it prunes any orphan left in its own dest dir by a prior install (a renamed/
+    removed reference), since the on-demand-load contract makes a stale references/*.md reachable."""
+    src = os.path.join(ROOT, "skills", MAINTENANCE)
+    if not os.path.isdir(src):
+        raise SystemExit("install: maintenance skill not found at %s" % src)
+    tokens = maintenance_tokens(vault)
+    rendered = []  # (relpath, baked-content) for every file under the skill dir
+    for dirpath, dirnames, filenames in os.walk(src):
+        dirnames.sort()
+        for fn in sorted(filenames):
+            if fn.startswith("."):  # skip .DS_Store and friends
+                continue
+            full = os.path.join(dirpath, fn)
+            rel = os.path.relpath(full, src)
+            text = open(full, encoding="utf-8").read()
+            for token, value in tokens:
+                text = text.replace(token, value)
+            leftover = sorted(set(re.findall(r"@[A-Z_]+@", text)))
+            if leftover:  # an unbaked token would ship a broken path — fail fast, never deploy it
+                raise SystemExit("install: %s/%s has unbaked token(s) %s — add them to maintenance_tokens()"
+                                 % (MAINTENANCE, rel, ", ".join(leftover)))
+            rendered.append((rel, text))
+    keep = {rel for rel, _ in rendered}
+    for provider in PROVIDERS:
+        base = os.path.join(dest, provider, "skills", MAINTENANCE)
+        # Prune orphans first so a renamed/removed reference does not linger in the deployed
+        # multi-file skill (its SKILL.md tells agents to load references on demand, so a stale
+        # references/*.md is reachable). Scoped to this skill's own dir — never touches other
+        # skills or user files. This makes a multi-file deploy byte-equal to source, not additive.
+        if os.path.isdir(base):
+            for dp, _, fs in os.walk(base, topdown=False):
+                for f in fs:
+                    full = os.path.join(dp, f)
+                    if os.path.relpath(full, base) not in keep:
+                        os.remove(full)
+                if dp != base and not os.listdir(dp):
+                    os.rmdir(dp)
+        for rel, text in rendered:
+            target = os.path.join(base, rel)
+            try:
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                with open(target, "w", encoding="utf-8") as fh:
+                    fh.write(text)
+            except OSError as err:
+                raise SystemExit("install: cannot write %s/skills/%s/%s under --dest %s — %s"
+                                 % (provider, MAINTENANCE, rel, dest, err))
+    print("install: %s -> %s  (%d files, tokens baked)"
+          % (MAINTENANCE, ", ".join("%s/skills/%s" % (pr, MAINTENANCE) for pr in PROVIDERS), len(rendered)))
+
+
+def siblings():
+    """Sibling config files: skip the README, dotfiles (e.g. macOS .DS_Store), and any file
+    that isn't a real config (no `stem`), so a stray file never derails the whole install."""
+    cfg_dir = os.path.join(ROOT, "config")
+    out = []
+    for f in sorted(os.listdir(cfg_dir)):
+        path = os.path.join(cfg_dir, f)
+        if f.startswith(".") or f == "README.md" or not os.path.isfile(path):
+            continue
+        if "stem" in parse_kv(path):
+            out.append(f)
+    return out
+
+
+def practice_skills():
+    """Practice-skill names: subdirs of skills/practice/. Each is an authored skill — a SHARED
+    <name>/SKILL.md (default) or a PER-VENDOR <provider>/SKILL.md per provider (resolved by
+    practice_sources()), plus one shared agents.md. Skips dotfiles / non-dirs so a stray entry never
+    derails the install — the mirror of siblings() over config/."""
+    base = os.path.join(ROOT, "skills", PRACTICE_DIR)
+    if not os.path.isdir(base):
+        return []
+    return [f for f in sorted(os.listdir(base))
+            if not f.startswith(".") and os.path.isdir(os.path.join(base, f))]
+
+
+def bake_vault(text, vault, where):
+    """Substitute @VAULT@ to the normalized absolute vault path, then fail fast on any leftover
+    @TOKEN@ — never ship a broken path (the practice mirror of deploy_maintenance's guard; a practice
+    body needs only @VAULT@ today)."""
+    text = text.replace("@VAULT@", os.path.abspath(os.path.expanduser(vault)))
+    leftover = sorted(set(re.findall(r"@[A-Z_]+@", text)))
+    if leftover:
+        raise SystemExit("install: %s has unbaked token(s) %s — a practice body supports only @VAULT@"
+                         % (where, ", ".join(leftover)))
+    return text
+
+
+def practice_sources(sdir, name):
+    """Resolve each provider's SKILL.md source for a practice skill. Two mutually-exclusive layouts:
+
+      - SHARED (the default): a single `<name>/SKILL.md` deployed byte-identical to every provider.
+        Use this whenever the providers do not actually diverge — most skills.
+      - PER-VENDOR (the exception): `<name>/<provider-subdir>/SKILL.md`, one body per provider. A
+        skill earns this ONLY when a runtime primitive forces the bodies apart (e.g. Codex's
+        /compact takes no focus argument, Claude's $ARGUMENTS does not exist on Codex). See
+        skills/practice/README.md for the divergence test, and the install-selftest gate that
+        snapshots each per-vendor skill's divergence so unjustified drift is caught.
+
+    A shared file AND any per-provider dir together is an authoring ambiguity, not a merge — clean
+    error. Returns {provider: source_path}."""
+    shared = os.path.join(sdir, "SKILL.md")
+    per_vendor = {pr: os.path.join(sdir, PROVIDER_SUBDIR[pr], "SKILL.md") for pr in PROVIDERS}
+    has_shared = os.path.isfile(shared)
+    present_vendor = {pr: p for pr, p in per_vendor.items() if os.path.isfile(p)}
+    if has_shared and present_vendor:
+        raise SystemExit("install: practice skill %r has BOTH a shared SKILL.md and a per-provider "
+                         "%s/SKILL.md — pick one layout (shared by default; split per-vendor only when "
+                         "a runtime primitive forces it)"
+                         % (name, ", ".join(PROVIDER_SUBDIR[pr] for pr in present_vendor)))
+    if has_shared:
+        return {pr: shared for pr in PROVIDERS}  # one body, byte-identical to every provider
+    missing = [PROVIDER_SUBDIR[pr] for pr in PROVIDERS if pr not in present_vendor]
+    if missing:
+        raise SystemExit("install: practice skill %r needs a shared SKILL.md or a SKILL.md for every "
+                         "provider — missing %s" % (name, ", ".join("%s/SKILL.md" % m for m in missing)))
+    return per_vendor
+
+
+def deploy_practice_skill(dest, vault, name):
+    """Deploy one authored practice skill, then upsert its single shared, provider-neutral activation
+    block into the shared AGENTS.md. The body layout is resolved by practice_sources(): a SHARED
+    `<name>/SKILL.md` goes byte-identical to both providers (the default), while a PER-VENDOR skill
+    ships each provider its own `<provider>/SKILL.md` (frontmatter and body diverge by runtime — e.g.
+    the Codex compact-focus avoids Claude's /compact-focus-argument form). @VAULT@ is baked absolute
+    either way. Single-file + additive like the KB adapters (no multi-file prune)."""
+    sdir = os.path.join(ROOT, "skills", PRACTICE_DIR, name)
+    sources = practice_sources(sdir, name)
+    for provider in PROVIDERS:
+        src = sources[provider]
+        text = bake_vault(open(src, encoding="utf-8").read(), vault,
+                          "practice/%s" % os.path.relpath(src, sdir))
+        target = os.path.join(dest, provider, "skills", name)
+        try:
+            os.makedirs(target, exist_ok=True)
+            with open(os.path.join(target, "SKILL.md"), "w", encoding="utf-8") as fh:
+                fh.write(text)
+        except OSError as err:
+            raise SystemExit("install: cannot write %s/skills/%s/SKILL.md under --dest %s — %s"
+                             % (provider, name, dest, err))
+    tag = None
+    agents_md = os.path.join(sdir, "agents.md")
+    if os.path.isfile(agents_md):
+        block = open(agents_md, encoding="utf-8").read().rstrip("\n")
+        tag = upsert_agents_block(os.path.join(dest, "AGENTS.md"), block)
+    print("install: %s -> %s%s"
+          % (name, ", ".join("%s/skills/%s/SKILL.md" % (pr, name) for pr in PROVIDERS),
+             ("  (AGENTS.md <%s>)" % tag) if tag else ""))
+
+
+def should_install_pre_commit(choice, only):
+    """Resolve the optional local hook setup UX.
+
+    Explicit flags are authoritative. Without a flag, prompt only for an interactive full install;
+    scripted installs and surgical --only runs do not surprise the caller with a local Git hook."""
+    if choice is not None:
+        return choice
+    if only or not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return False
+    print("\nOptional local guard:")
+    print("  Run ./selftest-gate --staged before commits.")
+    print("  Existing hooks are preserved and chained.")
+    answer = input("Install local pre-commit hook? [y/N] ").strip().lower()
+    return answer in ("y", "yes")
+
+
+def install_pre_commit_hook():
+    """Install the optional local hook through the shared gate runner."""
+    gate = os.path.join(ROOT, "selftest-gate")
+    r = subprocess.run([gate, "--install-pre-commit"], cwd=ROOT)
+    if r.returncode != 0:
+        raise SystemExit(r.returncode)
+
+
+def main():
+    p = argparse.ArgumentParser(description="Install the KB family into both agents.")
+    p.add_argument("--dest", default="~", help="install prefix holding .claude/, .codex/, and the shared "
+                   "AGENTS.md (default: ~ — the live chezmoi-managed file; pass a sandbox for testing)")
+    p.add_argument("--vault", default=DEFAULT_VAULT, help="vault repo path — baked into adapters, "
+                   "git-initialised as a repo root, and recorded for the engine (default: %s)" % DEFAULT_VAULT)
+    p.add_argument("--only", help="install just this sibling (config/ stem or full skill name)")
+    hook = p.add_mutually_exclusive_group()
+    hook.add_argument("--install-pre-commit", dest="install_pre_commit", action="store_true",
+                      help="also install the optional local pre-commit selftest gate")
+    hook.add_argument("--no-install-pre-commit", dest="install_pre_commit", action="store_false",
+                      help="do not prompt for or install the optional local pre-commit selftest gate")
+    p.set_defaults(install_pre_commit=None)
+    args = p.parse_args()
+    dest = os.path.expanduser(args.dest)
+    # Normalise the vault to ONE absolute path up front, so every consumer bakes the same string —
+    # the KB adapters (@INDEX@/@KNOWLEDGE@), the maintenance skill (@VAULT@), and the engine-recorded
+    # location. (render_adapter only expanduser'd, so a relative --vault used to bake a relative path
+    # there while the engine recorded an absolute one — a latent mismatch.)
+    args.vault = os.path.abspath(os.path.expanduser(args.vault))
+
+    only = args.only
+    if only and only.endswith("-knowledge-base"):
+        only = only[: -len("-knowledge-base")]  # accept the printed skill name too
+    # The maintenance skill and the practice skills are family-level, not config siblings —
+    # `--only <one>` targets just it; a full run deploys all; a surgical `--only <sibling>` leaves
+    # the family-level ones alone.
+    practice = practice_skills()
+    if not only:
+        targets = siblings()
+    elif only == MAINTENANCE or only in practice:
+        targets = []
+    else:
+        targets = [only]  # a sibling, or an unknown name -> render_adapter raises a clean error
+    agents_path = os.path.join(dest, "AGENTS.md")  # the shared file both providers symlink to
+    for sibling in targets:
+        name, adapter, block = render_adapter(sibling, args.vault)
+        for provider in PROVIDERS:
+            skill_dir = os.path.join(dest, provider, "skills", name)
+            try:
+                os.makedirs(skill_dir, exist_ok=True)
+                with open(os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8") as fh:
+                    fh.write(adapter)
+            except OSError as err:  # bad/unwritable --dest, …
+                raise SystemExit("install: cannot write %s/skills/%s/SKILL.md under --dest %s — %s"
+                                 % (provider, name, dest, err))
+        print("install: %s -> %s" % (name, ", ".join("%s/skills/%s/SKILL.md" % (pr, name) for pr in PROVIDERS)))
+        if block is not None:
+            tag = upsert_agents_block(agents_path, block)
+            print("install: AGENTS.md <%s> trigger block -> %s" % (tag, agents_path))
+
+    # family-level vault setup, once per run (after the siblings render cleanly)
+    vault = ensure_vault_repo(args.vault)
+    conf = record_vault_location(vault)
+    print("install: vault -> %s  (recorded in %s)" % (vault, conf))
+
+    # family-level maintenance skill: a full run or an explicit `--only metacognition-maintenance`
+    # deploys it; a surgical `--only <sibling>` does not.
+    if not only or only == MAINTENANCE:
+        deploy_maintenance(dest, vault)
+
+    # family-level practice skills: a full run, or an explicit `--only <practice-name>`, deploys them;
+    # a surgical `--only <sibling>` / `--only metacognition-maintenance` leaves them alone.
+    for name in (practice if not only else ([only] if only in practice else [])):
+        deploy_practice_skill(dest, vault, name)
+
+    if should_install_pre_commit(args.install_pre_commit, only):
+        install_pre_commit_hook()
+    else:
+        print("install: local pre-commit hook not installed (run ./selftest-gate --install-pre-commit to enable)")
+
+
+if __name__ == "__main__":
+    main()
