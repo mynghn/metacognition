@@ -47,6 +47,7 @@ RELEVANT_PREFIXES = (
 
 SENTINEL_START = "# metacognition selftest-gate sentinel start"
 SENTINEL_END = "# metacognition selftest-gate sentinel end"
+PRESERVED_HOOK = "pre-commit.metacognition-existing"
 
 
 def repo_rel(path):
@@ -207,17 +208,26 @@ def hook_block():
     return "\n".join((
         SENTINEL_START,
         'repo_root="$(git rev-parse --show-toplevel)" || exit $?',
-        'exec "$repo_root/selftest-gate" --staged',
+        '"$repo_root/selftest-gate" --staged || exit $?',
         SENTINEL_END,
         "",
     ))
 
 
-def managed_hook_body():
-    return "\n".join((
+def managed_hook_body(chain_existing=False):
+    lines = [
         "#!/bin/sh",
         hook_block(),
-    ))
+    ]
+    if chain_existing:
+        lines.extend((
+            'existing_hook="$(git rev-parse --git-path hooks/%s)" || exit $?' % PRESERVED_HOOK,
+            'if [ -x "$existing_hook" ]; then',
+            '  exec "$existing_hook" "$@"',
+            "fi",
+            "",
+        ))
+    return "\n".join(lines)
 
 
 def replace_sentinel_block(existing):
@@ -243,9 +253,15 @@ def install_pre_commit():
     hook_path.parent.mkdir(parents=True, exist_ok=True)
     existing = hook_path.read_text(encoding="utf-8") if hook_path.exists() else ""
     if existing.strip() and SENTINEL_START not in existing:
-        print("%s: existing pre-commit hook is not managed; not overwritten" % PROG)
-        print("Add this block to chain the gate manually:")
-        print(hook_block(), end="")
+        preserved = hook_path.with_name(PRESERVED_HOOK)
+        if preserved.exists():
+            print("%s: preserved hook already exists: %s" % (PROG, preserved), file=sys.stderr)
+            return 2
+        hook_path.rename(preserved)
+        hook_path.write_text(managed_hook_body(chain_existing=True), encoding="utf-8")
+        mode = hook_path.stat().st_mode
+        hook_path.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        print("%s: installed %s and preserved existing hook at %s" % (PROG, hook_path, preserved))
         return 0
 
     if SENTINEL_START in existing:

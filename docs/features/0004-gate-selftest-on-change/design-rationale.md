@@ -16,7 +16,7 @@ The rejected alternative was a path-filtered workflow keyed only to framework so
 
 Install the local hook as an opt-in convenience, not as the authority. Local hooks catch mistakes earlier, but they are intentionally bypassable and machine-local. CI remains the source of review truth.
 
-The hook installer refuses to overwrite an unknown hook because hook files are executable scripts, not declarative config. Appending blindly can land after an existing `exit`, and replacing blindly can delete a user's local checks. A sentinel-managed block gives idempotence for the hook this feature owns while keeping unrelated local policy outside the framework's ownership.
+The hook installer preserves unknown hook content because hook files are executable scripts, not declarative config. Replacing blindly can delete a user's local checks, while appending after the existing body can land after an `exit`, and inserting shell into a non-shell hook can break it. A sentinel-managed wrapper gives idempotence for the hook this feature owns while invoking the original hook after the gate passes.
 
 ## D-5: gate-contract-selfcheck
 

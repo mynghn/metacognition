@@ -47,12 +47,13 @@ Add `.github/workflows/selftest-gate.yml` as the authoritative review-path gate 
 `selftest-gate --install-pre-commit` installs an opt-in local pre-commit hook that invokes `./selftest-gate --staged`, satisfying `Spec#B-3-local-guard-can-be-enabled` without making local hooks authoritative for `Spec#C-2-current-pass-required-for-health`. See rationale at [design-rationale.md#D-3-local-pre-commit-hook].
 
 - Hook path is resolved with `git rev-parse --git-path hooks/pre-commit`, so normal checkouts and linked worktrees use the correct Git hook location.
-- Created hook body:
+- Created hook wrapper:
   - resolves `repo_root` with `git rev-parse --show-toplevel`;
-  - executes `"$repo_root/selftest-gate" --staged`;
+  - runs `"$repo_root/selftest-gate" --staged` and stops the hook only when the gate fails;
   - contains a `metacognition selftest-gate` sentinel block.
+- When an unmanaged non-empty hook already exists, the installer preserves it as a sidecar hook and invokes it after the gate passes.
 - Re-running the installer replaces only an existing sentinel-managed hook.
-- A non-empty hook without the sentinel is not overwritten; the command exits cleanly with a snippet the maintainer can chain manually.
+- A non-empty hook without the sentinel is not deleted or overwritten; the installer adds the managed wrapper while preserving the existing hook behavior (`UnderstandingShifts#Delta-2-local-hook-install-is-additive`).
 - Local bypass remains Git's explicit `--no-verify` path; CI still runs `Design#D-2-github-actions-authoritative-gate`.
 
 ## D-4: source-relevance-classifier

@@ -52,7 +52,7 @@ flowchart LR
 - **Repo**: `metacognition`
 - **Completion**:
   - Installing the hook in a sandboxed repository makes relevant staged changes invoke the gate before local handoff (`Spec#B-3-local-guard-can-be-enabled`).
-  - Re-running the installer is idempotent for a sentinel-managed hook, while an unrelated hook is not overwritten (`Spec#B-3-local-guard-can-be-enabled`).
+  - Re-running the installer is idempotent for a sentinel-managed hook, while an unrelated hook is preserved and has the gate behavior added (`Spec#B-3-local-guard-can-be-enabled`).
   - A local bypass does not create or modify the authoritative review-path result (`Spec#C-2-current-pass-required-for-health`).
 - **Dependencies**: G1
 
