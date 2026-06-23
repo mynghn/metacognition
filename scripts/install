@@ -52,6 +52,7 @@ FRESHNESS = "metacognition-freshness"  # read-only freshness check + confirmed-u
 FAMILY_SKILLS = (MAINTENANCE, FRESHNESS)
 PRACTICE_DIR = "practice"  # skills/practice/<name>/[<provider>/]SKILL.md + a shared agents.md per skill
 PROVIDER_SUBDIR = {".claude": "claude", ".agents": "codex"}  # per-vendor source subdir (when a skill diverges)
+PRE_COMMIT_SENTINEL = "# metacognition selftest-gate sentinel start"
 
 
 def parse_kv(path):
@@ -396,9 +397,13 @@ def should_install_pre_commit(choice, only):
     """Resolve the optional local hook setup UX.
 
     Explicit flags are authoritative. Without a flag, prompt only for an interactive full install;
-    scripted installs and surgical --only runs do not surprise the caller with a local Git hook."""
+    scripted installs and surgical --only runs do not surprise the caller with a local Git hook.
+    A previously installed managed hook is an already-satisfied guard, so skip the prompt."""
     if choice is not None:
         return choice
+    if managed_pre_commit_installed():
+        print("install: local pre-commit hook already installed")
+        return False
     if only or not (sys.stdin.isatty() and sys.stdout.isatty()):
         return False
     print("\nOptional local guard:")
@@ -406,6 +411,21 @@ def should_install_pre_commit(choice, only):
     print("  Existing hooks are preserved and chained.")
     answer = input("Install local pre-commit hook? [y/N] ").strip().lower()
     return answer in ("y", "yes")
+
+
+def managed_pre_commit_installed():
+    """Return True when this repo already has the managed pre-commit guard installed."""
+    r = subprocess.run(["git", "-C", ROOT, "rev-parse", "--git-path", "hooks/pre-commit"],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        return False
+    hook = r.stdout.strip()
+    if not os.path.isabs(hook):
+        hook = os.path.join(ROOT, hook)
+    try:
+        return PRE_COMMIT_SENTINEL in open(hook, encoding="utf-8").read()
+    except OSError:
+        return False
 
 
 def install_pre_commit_hook():

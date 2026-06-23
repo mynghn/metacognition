@@ -36,8 +36,12 @@ a reconcile-toward-shared both fail until the snapshot is intentionally regenera
 --update-divergence`); a semantic check forbids any Claude-only primitive ($ARGUMENTS, `/compact <focus>`) in a Codex body.
 
 Local hook setup: the main installer exposes the selftest gate's pre-commit hook as opt-in setup UX. Non-interactive
-installs skip it by default; `--install-pre-commit` installs it; and an existing unmanaged hook is preserved and chained.
+installs skip it by default; an already-installed managed hook suppresses the prompt; `--install-pre-commit` installs it;
+and an existing unmanaged hook is preserved and chained.
 """
+import importlib.util
+import importlib.machinery
+import io
 import os
 import re
 import shutil
@@ -739,6 +743,33 @@ def main():
               r.returncode == 0 and os.path.isfile(hook) and os.access(hook, os.X_OK)
               and "metacognition selftest-gate sentinel" in hook_text
               and "rev-parse --local-env-vars" in hook_text, r.stderr)
+        loader = importlib.machinery.SourceFileLoader("install_under_test", hook_install)
+        spec = importlib.util.spec_from_loader("install_under_test", loader)
+        install_under_test = importlib.util.module_from_spec(spec)
+        loader.exec_module(install_under_test)
+
+        class TtyNoInput(io.StringIO):
+            def isatty(self):
+                return True
+
+            def readline(self, *args, **kwargs):
+                raise AssertionError("already-installed hook should suppress the prompt")
+
+        old_stdin, old_stdout = sys.stdin, sys.stdout
+        prompt_result = None
+        prompt_out = TtyNoInput()
+        prompt_error = ""
+        try:
+            sys.stdin = TtyNoInput()
+            sys.stdout = prompt_out
+            prompt_result = install_under_test.should_install_pre_commit(None, None)
+        except Exception as err:
+            prompt_error = str(err)
+        finally:
+            sys.stdin, sys.stdout = old_stdin, old_stdout
+        check("pre-commit setup: already-installed managed hook suppresses prompt",
+              prompt_result is False and "already installed" in prompt_out.getvalue() and not prompt_error,
+              prompt_error or prompt_out.getvalue())
 
         hook_root_existing = os.path.join(sb, "hook-install-existing")
         hook_install_existing = copy_install_repo(hook_root_existing)
