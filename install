@@ -47,6 +47,7 @@ DEFAULT_VAULT = "~/.local/share/metacognition-vault"
 PROVIDERS = (".claude", ".codex")  # both get the byte-identical adapter
 TIERS = ("everyday", "common", "situational")  # discovery-wiring gate; only `everyday` emits an AGENTS.md block
 MAINTENANCE = "metacognition-maintenance"  # the family-level maintenance skill (multi-file, token-baked)
+CAPTURE = "metacognition-capture"  # the family-level capture merit-gate skill (multi-file, token-baked)
 PRACTICE_DIR = "practice"  # skills/practice/<name>/[<provider>/]SKILL.md + a shared agents.md per skill
 PROVIDER_SUBDIR = {".claude": "claude", ".codex": "codex"}  # per-vendor source subdir (when a skill diverges)
 
@@ -233,6 +234,20 @@ def maintenance_tokens(vault):
     )
 
 
+def capture_tokens(vault):
+    """The engine/policy/vault @-tokens the capture gate is baked against — all absolute at install
+    time, the mirror of maintenance_tokens(). The gate is topic-parameterized (it composes
+    `--config @CONFIG_DIR@/<stem>` per target at runtime), so it bakes only the engine binary, the
+    config root, the vault root (for the orthogonality INDEX read), and the source policy — not the
+    health/family tokens, which are maintenance-only."""
+    return (
+        ("@ENGINE_BIN@", os.path.join(ROOT, "engine", "kb-engine")),
+        ("@CONFIG_DIR@", os.path.join(ROOT, "config")),
+        ("@VAULT@", os.path.abspath(os.path.expanduser(vault))),
+        ("@SOURCES@", os.path.join(ROOT, "SOURCES.md")),
+    )
+
+
 def deploy_maintenance(dest, vault):
     """Deploy the family-level maintenance skill byte-identical to BOTH providers, baking the @-tokens
     absolute. Unlike a KB sibling (one adapter rendered from a template), this is a multi-file skill
@@ -287,6 +302,58 @@ def deploy_maintenance(dest, vault):
                                  % (provider, MAINTENANCE, rel, dest, err))
     print("install: %s -> %s  (%d files, tokens baked)"
           % (MAINTENANCE, ", ".join("%s/skills/%s" % (pr, MAINTENANCE) for pr in PROVIDERS), len(rendered)))
+
+
+def deploy_capture(dest, vault):
+    """Deploy the family-level capture merit-gate skill byte-identical to BOTH providers, baking the
+    @-tokens absolute — the mirror of deploy_maintenance for the admission front door. Same multi-file
+    contract: SKILL.md + references/ shipped with token substitution applied to every file, no
+    scheduler/trigger artifact (discovery is the SKILL.md description alone), and orphan-pruned so a
+    renamed/removed reference never lingers in the on-demand-load skill — making the deploy byte-equal
+    to source, not additive."""
+    src = os.path.join(ROOT, "skills", CAPTURE)
+    if not os.path.isdir(src):
+        raise SystemExit("install: capture skill not found at %s" % src)
+    tokens = capture_tokens(vault)
+    rendered = []  # (relpath, baked-content) for every file under the skill dir
+    for dirpath, dirnames, filenames in os.walk(src):
+        dirnames.sort()
+        for fn in sorted(filenames):
+            if fn.startswith("."):  # skip .DS_Store and friends
+                continue
+            full = os.path.join(dirpath, fn)
+            rel = os.path.relpath(full, src)
+            text = open(full, encoding="utf-8").read()
+            for token, value in tokens:
+                text = text.replace(token, value)
+            leftover = sorted(set(re.findall(r"@[A-Z_]+@", text)))
+            if leftover:  # an unbaked token would ship a broken path — fail fast, never deploy it
+                raise SystemExit("install: %s/%s has unbaked token(s) %s — add them to capture_tokens()"
+                                 % (CAPTURE, rel, ", ".join(leftover)))
+            rendered.append((rel, text))
+    keep = {rel for rel, _ in rendered}
+    for provider in PROVIDERS:
+        base = os.path.join(dest, provider, "skills", CAPTURE)
+        # Prune orphans first (scoped to this skill's own dir), then write — same as deploy_maintenance.
+        if os.path.isdir(base):
+            for dp, _, fs in os.walk(base, topdown=False):
+                for f in fs:
+                    full = os.path.join(dp, f)
+                    if os.path.relpath(full, base) not in keep:
+                        os.remove(full)
+                if dp != base and not os.listdir(dp):
+                    os.rmdir(dp)
+        for rel, text in rendered:
+            target = os.path.join(base, rel)
+            try:
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                with open(target, "w", encoding="utf-8") as fh:
+                    fh.write(text)
+            except OSError as err:
+                raise SystemExit("install: cannot write %s/skills/%s/%s under --dest %s — %s"
+                                 % (provider, CAPTURE, rel, dest, err))
+    print("install: %s -> %s  (%d files, tokens baked)"
+          % (CAPTURE, ", ".join("%s/skills/%s" % (pr, CAPTURE) for pr in PROVIDERS), len(rendered)))
 
 
 def siblings():
@@ -437,13 +504,13 @@ def main():
     only = args.only
     if only and only.endswith("-knowledge-base"):
         only = only[: -len("-knowledge-base")]  # accept the printed skill name too
-    # The maintenance skill and the practice skills are family-level, not config siblings —
-    # `--only <one>` targets just it; a full run deploys all; a surgical `--only <sibling>` leaves
-    # the family-level ones alone.
+    # The maintenance skill, the capture gate, and the practice skills are family-level, not config
+    # siblings — `--only <one>` targets just it; a full run deploys all; a surgical `--only <sibling>`
+    # leaves the family-level ones alone.
     practice = practice_skills()
     if not only:
         targets = siblings()
-    elif only == MAINTENANCE or only in practice:
+    elif only == MAINTENANCE or only == CAPTURE or only in practice:
         targets = []
     else:
         targets = [only]  # a sibling, or an unknown name -> render_adapter raises a clean error
@@ -473,6 +540,11 @@ def main():
     # deploys it; a surgical `--only <sibling>` does not.
     if not only or only == MAINTENANCE:
         deploy_maintenance(dest, vault)
+
+    # family-level capture gate: a full run or an explicit `--only metacognition-capture`
+    # deploys it; a surgical `--only <sibling>` does not.
+    if not only or only == CAPTURE:
+        deploy_capture(dest, vault)
 
     # family-level practice skills: a full run, or an explicit `--only <practice-name>`, deploys them;
     # a surgical `--only <sibling>` / `--only metacognition-maintenance` leaves them alone.
