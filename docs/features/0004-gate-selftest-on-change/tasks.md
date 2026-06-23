@@ -51,6 +51,7 @@ flowchart LR
 - **Goal**: Add the opt-in local guard installer on the shared gate path (`Design#D-3-local-pre-commit-hook`, `Design#D-1-selftest-gate-runner`).
 - **Repo**: `metacognition`
 - **Completion**:
+  - Running `install` in non-interactive setup skips hook installation unless the explicit hook flag is used, while the explicit flag installs the same managed hook path (`Spec#B-3-local-guard-can-be-enabled`).
   - Installing the hook in a sandboxed repository makes relevant staged changes invoke the gate before local handoff (`Spec#B-3-local-guard-can-be-enabled`).
   - Re-running the installer is idempotent for a sentinel-managed hook, while an unrelated hook is preserved and has the gate behavior added (`Spec#B-3-local-guard-can-be-enabled`).
   - A local bypass does not create or modify the authoritative review-path result (`Spec#C-2-current-pass-required-for-health`).

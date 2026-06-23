@@ -34,6 +34,9 @@ Vendor-divergence gate: each per-vendor skill ships a golden `vendor-divergence`
 sorted set of provider-unique lines). The gate asserts the live divergence equals the snapshot, so gratuitous drift or
 a reconcile-toward-shared both fail until the snapshot is intentionally regenerated (`./install-selftest
 --update-divergence`); a semantic check forbids any Claude-only primitive ($ARGUMENTS, `/compact <focus>`) in a Codex body.
+
+Local hook setup: the main installer exposes the selftest gate's pre-commit hook as opt-in setup UX. Non-interactive
+installs skip it by default; `--install-pre-commit` installs it; and an existing unmanaged hook is preserved and chained.
 """
 import os
 import re
@@ -65,6 +68,18 @@ def run(args):
 
 def read(dest, provider, name):
     return open(os.path.join(dest, provider, "skills", name, "SKILL.md"), encoding="utf-8").read()
+
+
+def copy_install_repo(dest):
+    """Copy the installable repo to a disposable git repo, excluding VCS/runtime noise, so explicit
+    hook-install checks never touch this checkout's real .git/hooks."""
+    def ignore(_dir, names):
+        return {n for n in names if n in (".git", ".worktrees", "__pycache__") or n.endswith(".pyc")}
+    shutil.copytree(ROOT, dest, ignore=ignore)
+    subprocess.run(["git", "-C", dest, "init", "-q"], check=True)
+    subprocess.run(["git", "-C", dest, "config", "user.email", "selftest@example.com"], check=True)
+    subprocess.run(["git", "-C", dest, "config", "user.name", "selftest"], check=True)
+    return os.path.join(dest, "install")
 
 
 # ---- vendor-divergence gate ---------------------------------------------------------------------
@@ -670,6 +685,43 @@ def main():
               os.path.realpath(before) == os.path.realpath(outer)  # the vault really resolved UP to the outer repo before
               and topn.returncode == 0 and os.path.realpath(topn.stdout.strip()) == os.path.realpath(nested),  # now its own root
               "before=%s topn=%s" % (before, (topn.stdout + topn.stderr).strip()))
+
+        # ---- optional local pre-commit hook setup UX ---------------------------------------------
+        hook_root = os.path.join(sb, "hook-install-repo")
+        hook_install = copy_install_repo(hook_root)
+
+        def run_hook_install(extra):
+            return subprocess.run([sys.executable, hook_install, "--dest", os.path.join(hook_root, "dest"),
+                                   "--vault", os.path.join(hook_root, "vault"), *extra],
+                                  cwd=hook_root, capture_output=True, text=True)
+
+        r = run_hook_install([])
+        hook = os.path.join(hook_root, ".git", "hooks", "pre-commit")
+        check("pre-commit setup: non-interactive install skips by default",
+              r.returncode == 0 and not os.path.exists(hook) and "not installed" in r.stdout, r.stderr)
+        r = run_hook_install(["--install-pre-commit"])
+        check("pre-commit setup: explicit flag installs the managed hook",
+              r.returncode == 0 and os.path.isfile(hook) and os.access(hook, os.X_OK)
+              and "metacognition selftest-gate sentinel" in open(hook, encoding="utf-8").read(), r.stderr)
+
+        hook_root_existing = os.path.join(sb, "hook-install-existing")
+        hook_install_existing = copy_install_repo(hook_root_existing)
+        hook_existing = os.path.join(hook_root_existing, ".git", "hooks", "pre-commit")
+        os.makedirs(os.path.dirname(hook_existing), exist_ok=True)
+        original_hook = "#!/bin/sh\necho existing hook\n"
+        with open(hook_existing, "w", encoding="utf-8") as fh:
+            fh.write(original_hook)
+        os.chmod(hook_existing, 0o755)
+        r = subprocess.run([sys.executable, hook_install_existing, "--dest", os.path.join(hook_root_existing, "dest"),
+                            "--vault", os.path.join(hook_root_existing, "vault"), "--install-pre-commit"],
+                           cwd=hook_root_existing, capture_output=True, text=True)
+        preserved = os.path.join(hook_root_existing, ".git", "hooks", "pre-commit.metacognition-existing")
+        wrapper = open(hook_existing, encoding="utf-8").read() if os.path.isfile(hook_existing) else ""
+        check("pre-commit setup: existing unmanaged hook is preserved and chained",
+              r.returncode == 0 and os.path.isfile(preserved)
+              and open(preserved, encoding="utf-8").read() == original_hook
+              and "pre-commit.metacognition-existing" in wrapper
+              and "metacognition selftest-gate sentinel" in wrapper, r.stderr)
     finally:
         shutil.rmtree(dest, ignore_errors=True)
         shutil.rmtree(sb, ignore_errors=True)

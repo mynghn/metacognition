@@ -44,7 +44,7 @@ Add `.github/workflows/selftest-gate.yml` as the authoritative review-path gate 
 
 ## D-3: local-pre-commit-hook
 
-`selftest-gate --install-pre-commit` installs an opt-in local pre-commit hook that invokes `./selftest-gate --staged`, satisfying `Spec#B-3-local-guard-can-be-enabled` without making local hooks authoritative for `Spec#C-2-current-pass-required-for-health`. See rationale at [design-rationale.md#D-3-local-pre-commit-hook].
+`selftest-gate --install-pre-commit` installs an opt-in local pre-commit hook that invokes `./selftest-gate --staged`, satisfying `Spec#B-3-local-guard-can-be-enabled` without making local hooks authoritative for `Spec#C-2-current-pass-required-for-health`. The main `install` command surfaces this as optional setup with explicit `--install-pre-commit` / `--no-install-pre-commit` flags and skips hook setup by default in non-interactive runs (`UnderstandingShifts#Delta-3-install-surfaces-local-guard`). See rationale at [design-rationale.md#D-3-local-pre-commit-hook].
 
 - Hook path is resolved with `git rev-parse --git-path hooks/pre-commit`, so normal checkouts and linked worktrees use the correct Git hook location.
 - Created hook wrapper:

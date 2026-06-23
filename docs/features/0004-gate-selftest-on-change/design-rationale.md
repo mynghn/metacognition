@@ -18,6 +18,8 @@ Install the local hook as an opt-in convenience, not as the authority. Local hoo
 
 The hook installer preserves unknown hook content because hook files are executable scripts, not declarative config. Replacing blindly can delete a user's local checks, while appending after the existing body can land after an `exit`, and inserting shell into a non-shell hook can break it. A sentinel-managed wrapper gives idempotence for the hook this feature owns while invoking the original hook after the gate passes.
 
+The main installer offers the hook as opt-in setup rather than installing it silently because Git hooks are local, mutable files and the gate can add noticeable latency to commits. Non-interactive installs skip the hook unless a flag requests it, so scripted installs stay stable.
+
 ## D-5: gate-contract-selfcheck
 
 Check the gate's own source-level contract inside the runner because source can verify committed files, but it cannot verify every repository's remote branch-protection settings without credentials. The contract check catches the source-level failures that matter most: the workflow disappears, stops running on PR or branch push, stops calling the shared runner, starts using path filters, or loses executable mode.
