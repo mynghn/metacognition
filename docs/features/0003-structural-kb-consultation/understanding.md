@@ -1,0 +1,16 @@
+# 0003-structural-kb-consultation — Understanding
+
+## Delta-1: practice-lane-evolved-span-only-consultation-holds
+
+Catching the branch up to `origin/main` (mynghn) does **not** move 0003's design — it sharpens its scope. The practice-skill lane D-1 models itself on evolved while this branch was forked (0002 `Delta-2`): the lane is now **shared `SKILL.md` by default, per-vendor only when a runtime primitive forces it**, held to that minimum by a **vendor-divergence golden snapshot** (principle doc `skills/practice/README.md`), and its shipped bodies are **KB-grounded** — "activation triggers; the skill self-grounds." None of that reaches 0003: the `<kb_consultation>` block it ships is a provider-neutral **`AGENTS.md` span with no `SKILL.md`**, so it engages neither new SKILL.md mechanism (the shared-or-per-vendor layout, the divergence gate) and still rides the **byte-unchanged** `upsert_agents_block`. It is the lane's simplest case — pure activation/policy, one span, no body — so every 0003 decision stands.
+
+Prior assumption killed: research recorded the practice lane as shipping **"per-provider `SKILL.md` files."** Stale — the lane is shared-or-per-vendor with a divergence gate.
+
+Why: the catch-up replayed only `plan(0001)` onto `origin/main`, where 0002 `Delta-2` had already generalized the lane and KB-grounded the bodies. Verified against `origin/main`, not taken on faith — `install` carries the `practice_sources` resolver, `upsert_agents_block` is byte-identical, `skills/practice/README.md` exists, and `0002/understanding.md` carries `Delta-2`. Corroborated.
+
+Two adjacent sharpenings, neither a decision change:
+
+- **D-3 agrees with "activation triggers; the skill self-grounds" — it is not in tension with it.** That 0002 principle holds *skill-activation* blocks to discovery-only, doctrine riding in the KB the skill loads. The `<kb_consultation>` block is not a skill-activation block; it is the consultation *policy* (the intent→KB registry + the JIT procedure). It rightly carries routing + procedure, and the KB siblings it routes to are what self-ground — consultation stays index-first JIT.
+- **`skills/practice/README.md` is now the precedent** for a framework-owned, family-level principle doc — a shape D-1's `consultation/` source can mirror.
+
+Scope-of-impact (a later `/revise` reconciles; `/sharpen` emits, never edits): `Design#D-1-kb-consultation-agents-block` (span-only ⇒ sidesteps shared-or-per-vendor + the divergence gate; still rides the unchanged `upsert_agents_block`; cite `skills/practice/README.md` as the lane precedent), `Design#D-3-jit-consultation-and-visible-marker` (position against "activation triggers; the skill self-grounds" per `Spec#C-3-jit-kb-loading`), `Spec#C-1-framework-owned-consultation-policy` (reinforced — span surface and ownership unchanged). The stale "per-provider `SKILL.md`" fact lives in `research.md` (recorded-for-retrieval, no resolvable anchor); its lane description should become shared-or-per-vendor + divergence gate. `requirements.md` may optionally cite 0002 `Delta-2` as a corroborating in-the-wild instance — a KB review of shipped prose caught real debt, but only via deliberate review, exactly the recognition-dependent gap this feature closes.
