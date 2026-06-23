@@ -1,0 +1,291 @@
+#!/usr/bin/env python3
+"""Run the repository selftest gate from one maintained entry point."""
+
+import argparse
+import os
+import stat
+import subprocess
+import sys
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parent
+PROG = "selftest-gate"
+TIMEOUT_SECONDS = 600
+
+SUITE_COMMANDS = (
+    "./install-selftest",
+    "./generate-selftest",
+    "./maintenance-selftest",
+    "./health-check-selftest",
+    "./no-net-loss-selftest",
+    "./engine/selftest",
+)
+
+RELEVANT_EXACT = {
+    ".github/workflows/selftest-gate.yml",
+    "selftest-gate",
+    "install",
+    "install-selftest",
+    "generate",
+    "generate-selftest",
+    "maintenance-selftest",
+    "health-check",
+    "health-check-selftest",
+    "no-net-loss",
+    "no-net-loss-selftest",
+    "FAMILY.md",
+    "SOURCES.md",
+}
+RELEVANT_PREFIXES = (
+    "engine/",
+    "config/",
+    "templates/",
+    "wiring/",
+    "skills/",
+)
+
+SENTINEL_START = "# metacognition selftest-gate sentinel start"
+SENTINEL_END = "# metacognition selftest-gate sentinel end"
+
+
+def repo_rel(path):
+    path = Path(path)
+    try:
+        return path.resolve().relative_to(ROOT).as_posix()
+    except ValueError:
+        return str(path).replace(os.sep, "/")
+
+
+def status(kind, name, detail=None):
+    line = "%s %s" % (kind, name)
+    if detail:
+        line += " - %s" % detail
+    print(line, flush=True)
+
+
+def command_output(name, proc):
+    if proc.stdout:
+        print("----- stdout: %s -----" % name)
+        print(proc.stdout, end="" if proc.stdout.endswith("\n") else "\n")
+    if proc.stderr:
+        print("----- stderr: %s -----" % name)
+        print(proc.stderr, end="" if proc.stderr.endswith("\n") else "\n")
+
+
+def run_process(name, argv):
+    status("RUN", name)
+    try:
+        proc = subprocess.run(
+            argv,
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=TIMEOUT_SECONDS,
+        )
+    except FileNotFoundError as exc:
+        status("FAIL", name, "missing command: %s" % exc.filename)
+        return False
+    except PermissionError:
+        status("FAIL", name, "not executable")
+        return False
+    except subprocess.TimeoutExpired as exc:
+        status("FAIL", name, "timed out after %ss" % TIMEOUT_SECONDS)
+        if exc.stdout:
+            print("----- stdout: %s -----" % name)
+            print(exc.stdout, end="" if exc.stdout.endswith("\n") else "\n")
+        if exc.stderr:
+            print("----- stderr: %s -----" % name)
+            print(exc.stderr, end="" if exc.stderr.endswith("\n") else "\n")
+        return False
+
+    if proc.returncode == 0:
+        status("PASS", name)
+        return True
+
+    status("FAIL", name, "exit %s" % proc.returncode)
+    command_output(name, proc)
+    return False
+
+
+def check(name, ok, detail=None):
+    status("RUN", "contract:%s" % name)
+    status("PASS" if ok else "FAIL", "contract:%s" % name, None if ok else detail)
+    return ok
+
+
+def workflow_text():
+    path = ROOT / ".github" / "workflows" / "selftest-gate.yml"
+    if not path.is_file():
+        return path, None
+    return path, path.read_text(encoding="utf-8")
+
+
+def contract_checks():
+    passed = []
+    workflow_path, text = workflow_text()
+    passed.append(check("workflow-present", text is not None, "missing %s" % repo_rel(workflow_path)))
+
+    if text is not None:
+        passed.append(check("workflow-name", "name: selftest-gate" in text,
+                            "workflow must be named selftest-gate"))
+        passed.append(check("workflow-pull-request", "pull_request" in text,
+                            "workflow must run on pull_request"))
+        passed.append(check("workflow-push", "push" in text,
+                            "workflow must run on push"))
+        passed.append(check("workflow-checkout", "actions/checkout@v7" in text,
+                            "workflow must use actions/checkout@v7"))
+        passed.append(check("workflow-runs-gate", "python3 ./selftest-gate --all" in text,
+                            "workflow must call python3 ./selftest-gate --all"))
+        path_filter = any(
+            line.strip().startswith("paths:") or line.strip().startswith("paths-ignore:")
+            for line in text.splitlines()
+        )
+        passed.append(check("workflow-no-path-filters", not path_filter,
+                            "workflow must not contain paths or paths-ignore filters"))
+
+    gate = ROOT / "selftest-gate"
+    passed.append(check("runner-executable", os.access(gate, os.X_OK),
+                        "selftest-gate must have executable mode"))
+    return all(passed)
+
+
+def run_gate():
+    ok = contract_checks()
+    for command in SUITE_COMMANDS:
+        path = ROOT / command[2:]
+        ok = run_process(command, [str(path)]) and ok
+    status("selftest-gate:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def staged_paths():
+    proc = subprocess.run(
+        ["git", "diff", "--cached", "--name-only", "--diff-filter=ACMRD"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        status("FAIL", "staged-paths", "git diff exited %s" % proc.returncode)
+        command_output("git diff --cached", proc)
+        status("selftest-gate:", "FAIL")
+        return None
+    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
+
+def is_relevant(path):
+    normalized = path.replace("\\", "/")
+    if normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized in RELEVANT_EXACT or any(normalized.startswith(prefix) for prefix in RELEVANT_PREFIXES)
+
+
+def run_staged():
+    paths = staged_paths()
+    if paths is None:
+        return 1
+    relevant = [path for path in paths if is_relevant(path)]
+    if not relevant:
+        print("%s: SKIP no relevant staged paths" % PROG)
+        return 0
+    print("%s: relevant staged paths:" % PROG)
+    for path in relevant:
+        print("  %s" % path)
+    return run_gate()
+
+
+def git_path(*args):
+    proc = subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True)
+    if proc.returncode != 0:
+        message = (proc.stderr or proc.stdout).strip() or "git %s failed" % " ".join(args)
+        raise RuntimeError(message)
+    return proc.stdout.strip()
+
+
+def hook_block():
+    return "\n".join((
+        SENTINEL_START,
+        'repo_root="$(git rev-parse --show-toplevel)" || exit $?',
+        'exec "$repo_root/selftest-gate" --staged',
+        SENTINEL_END,
+        "",
+    ))
+
+
+def managed_hook_body():
+    return "\n".join((
+        "#!/bin/sh",
+        hook_block(),
+    ))
+
+
+def replace_sentinel_block(existing):
+    start = existing.find(SENTINEL_START)
+    end = existing.find(SENTINEL_END)
+    if start == -1 or end == -1 or end < start:
+        return None
+    end += len(SENTINEL_END)
+    replacement = hook_block().rstrip("\n")
+    updated = existing[:start] + replacement + existing[end:]
+    return updated.rstrip("\n") + "\n"
+
+
+def install_pre_commit():
+    try:
+        hook_path = Path(git_path("rev-parse", "--git-path", "hooks/pre-commit"))
+    except RuntimeError as exc:
+        print("%s: %s" % (PROG, exc), file=sys.stderr)
+        return 2
+    if not hook_path.is_absolute():
+        hook_path = ROOT / hook_path
+
+    hook_path.parent.mkdir(parents=True, exist_ok=True)
+    existing = hook_path.read_text(encoding="utf-8") if hook_path.exists() else ""
+    if existing.strip() and SENTINEL_START not in existing:
+        print("%s: existing pre-commit hook is not managed; not overwritten" % PROG)
+        print("Add this block to chain the gate manually:")
+        print(hook_block(), end="")
+        return 0
+
+    if SENTINEL_START in existing:
+        updated = replace_sentinel_block(existing)
+        if updated is None:
+            print("%s: malformed managed pre-commit hook sentinel" % PROG, file=sys.stderr)
+            return 2
+        hook_path.write_text(updated, encoding="utf-8")
+    else:
+        hook_path.write_text(managed_hook_body(), encoding="utf-8")
+
+    mode = hook_path.stat().st_mode
+    hook_path.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    print("%s: installed %s" % (PROG, hook_path))
+    return 0
+
+
+def parse_args(argv):
+    parser = argparse.ArgumentParser(prog=PROG)
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--all", action="store_true", help="run the contract check and full selftest suite")
+    group.add_argument("--staged", action="store_true", help="run the gate only when staged paths are relevant")
+    group.add_argument("--install-pre-commit", action="store_true", help="install or refresh the local pre-commit hook")
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    try:
+        if args.all:
+            return run_gate()
+        if args.staged:
+            return run_staged()
+        if args.install_pre_commit:
+            return install_pre_commit()
+    except KeyboardInterrupt:
+        print("%s: interrupted" % PROG, file=sys.stderr)
+        return 130
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
