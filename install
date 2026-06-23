@@ -40,6 +40,7 @@ import argparse
 import os
 import re
 import subprocess
+import sys
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_VAULT = "~/.local/share/metacognition-vault"
@@ -388,6 +389,30 @@ def deploy_practice_skill(dest, vault, name):
              ("  (AGENTS.md <%s>)" % tag) if tag else ""))
 
 
+def should_install_pre_commit(choice, only):
+    """Resolve the optional local hook setup UX.
+
+    Explicit flags are authoritative. Without a flag, prompt only for an interactive full install;
+    scripted installs and surgical --only runs do not surprise the caller with a local Git hook."""
+    if choice is not None:
+        return choice
+    if only or not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return False
+    print("\nOptional local guard:")
+    print("  Run ./selftest-gate --staged before commits.")
+    print("  Existing hooks are preserved and chained.")
+    answer = input("Install local pre-commit hook? [y/N] ").strip().lower()
+    return answer in ("y", "yes")
+
+
+def install_pre_commit_hook():
+    """Install the optional local hook through the shared gate runner."""
+    gate = os.path.join(ROOT, "selftest-gate")
+    r = subprocess.run([sys.executable, gate, "--install-pre-commit"], cwd=ROOT)
+    if r.returncode != 0:
+        raise SystemExit(r.returncode)
+
+
 def main():
     p = argparse.ArgumentParser(description="Install the KB family into both agents.")
     p.add_argument("--dest", default="~", help="install prefix holding .claude/, .codex/, and the shared "
@@ -395,6 +420,12 @@ def main():
     p.add_argument("--vault", default=DEFAULT_VAULT, help="vault repo path — baked into adapters, "
                    "git-initialised as a repo root, and recorded for the engine (default: %s)" % DEFAULT_VAULT)
     p.add_argument("--only", help="install just this sibling (config/ stem or full skill name)")
+    hook = p.add_mutually_exclusive_group()
+    hook.add_argument("--install-pre-commit", dest="install_pre_commit", action="store_true",
+                      help="also install the optional local pre-commit selftest gate")
+    hook.add_argument("--no-install-pre-commit", dest="install_pre_commit", action="store_false",
+                      help="do not prompt for or install the optional local pre-commit selftest gate")
+    p.set_defaults(install_pre_commit=None)
     args = p.parse_args()
     dest = os.path.expanduser(args.dest)
     # Normalise the vault to ONE absolute path up front, so every consumer bakes the same string —
@@ -447,6 +478,11 @@ def main():
     # a surgical `--only <sibling>` / `--only metacognition-maintenance` leaves them alone.
     for name in (practice if not only else ([only] if only in practice else [])):
         deploy_practice_skill(dest, vault, name)
+
+    if should_install_pre_commit(args.install_pre_commit, only):
+        install_pre_commit_hook()
+    else:
+        print("install: local pre-commit hook not installed (run ./selftest-gate --install-pre-commit to enable)")
 
 
 if __name__ == "__main__":
