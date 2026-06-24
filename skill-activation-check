@@ -1,0 +1,236 @@
+#!/usr/bin/env python3
+"""skill-activation-check — deterministic scorer for the no-cue skill-activation eval.
+
+Turns a set of scenario runs into three things, model-free and read-only (the same out-of-band,
+worklist-to-stdout, exit-code-as-verdict shape as health-check):
+  1. a reviewable MISS / FALSE-FIRE worklist — one stdout line per scenario that did not behave
+     correctly on every trial, so a passed-over moment is observable after the fact instead of silent;
+  2. the self-use and false-fire RATES over the corpus;
+  3. a promote / hold GATE verdict, when scored against a recorded baseline.
+
+It reads three inputs and joins them by scenario id:
+  - the labeled corpus (each scenario's scoped skill + should_fire), single-sourced scope via
+    engine/transcript.py so the scorer's notion of scope cannot drift from the reader's;
+  - a runs MANIFEST (JSONL, one line per trial: {"id", "trial", "transcript"}) — the contract the
+    driver produces; a scenario with no manifest entries is reported as unscored, never silently
+    counted as a pass (that would hide a dropped, non-reproducible scenario behind a green number);
+  - optionally a baseline artifact to gate against, or --record-baseline to write one.
+
+Firing per trial is the deterministic transcript read (engine/transcript.fired_in_session): the scoped
+skill fired in a run iff it appears in that run's transcripts (main + sub-agents). Self-activation is
+non-deterministic, so a scenario is aggregated over its N trials as a fire FRACTION, never read from a
+single run; the two rates are the mean fire-fraction over the should_fire=true scenarios (self-use) and
+over the should_fire=false scenarios (false-fire) — recall and precision kept as separate numbers.
+
+GATE (a candidate promotes only on measured lift): promote iff self_use >= baseline.self_use + margin
+AND false_fire <= bar; else hold. margin and bar are product-decision parameters fixed with the
+baseline and read back from it — the pass bar is a decision, not a hardcoded number; a negative verdict
+is a valid result, never patched by loosening the gate.
+
+Output: worklist to stdout (silence = every scored scenario behaved correctly on every trial); rates +
+verdict + unscored count to stderr. Exit 0 normal, 2 on a usage/input error (clean message, no
+traceback) — a malformed corpus / manifest / transcript / baseline fails loud rather than scoring wrong.
+"""
+import argparse
+import datetime
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "engine"))
+import transcript  # firing-detection core + the single-sourced SCOPED_SKILLS
+
+PROG = "skill-activation-check"
+SCHEMA_KEYS = {"id", "skill", "setup", "framing", "should_fire"}
+
+
+def warn(msg):
+    sys.stderr.write("%s: %s\n" % (PROG, msg))
+
+
+class InputError(Exception):
+    """A usage / input problem (malformed corpus, manifest, baseline): exit 2 with a clean message."""
+
+
+def load_corpus(path):
+    """Read the labeled corpus into {id: scenario}. Validates every line against the scenario schema and
+    the single-sourced scope; a malformed or duplicate scenario fails loud (the rates would be wrong)."""
+    scenarios = {}
+    with open(path, encoding="utf-8") as fh:
+        for lineno, raw in enumerate(fh, 1):
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise InputError("corpus %s:%d is not valid JSON (%s)" % (path, lineno, exc))
+            if not isinstance(rec, dict) or not SCHEMA_KEYS.issubset(rec):
+                raise InputError("corpus %s:%d is missing required scenario fields "
+                                 "{id, skill, setup, framing, should_fire}" % (path, lineno))
+            if rec["skill"] not in transcript.SCOPED_SKILLS:
+                raise InputError("corpus %s:%d skill %r is not a scoped skill" % (path, lineno, rec["skill"]))
+            if not isinstance(rec["should_fire"], bool):
+                raise InputError("corpus %s:%d should_fire is not a bool" % (path, lineno))
+            if rec["id"] in scenarios:
+                raise InputError("corpus %s:%d duplicate scenario id %r" % (path, lineno, rec["id"]))
+            scenarios[rec["id"]] = rec
+    return scenarios
+
+
+def load_runs(path):
+    """Read the driver manifest into {id: [(trial, transcript_path), ...]}. Each line is one trial."""
+    runs = {}
+    with open(path, encoding="utf-8") as fh:
+        for lineno, raw in enumerate(fh, 1):
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise InputError("runs %s:%d is not valid JSON (%s)" % (path, lineno, exc))
+            if not isinstance(rec, dict) or "id" not in rec or "transcript" not in rec:
+                raise InputError("runs %s:%d is missing a required key {id, transcript}" % (path, lineno))
+            runs.setdefault(rec["id"], []).append((rec.get("trial"), rec["transcript"]))
+    return runs
+
+
+def score(scenarios, runs):
+    """Per scenario, the fraction of its trials in which its scoped skill fired. Returns (results,
+    unscored): results is one dict per scored scenario; unscored is corpus ids with no manifest runs."""
+    results, unscored = [], []
+    for sid, scen in scenarios.items():
+        trials = runs.get(sid, [])
+        if not trials:
+            unscored.append(sid)
+            continue
+        fires = 0
+        for _trial, txpath in trials:
+            if not os.path.exists(txpath):
+                raise InputError("transcript for scenario %r not found: %s" % (sid, txpath))
+            if scen["skill"] in transcript.fired_in_session(txpath):
+                fires += 1
+        results.append({"id": sid, "skill": scen["skill"], "should_fire": scen["should_fire"],
+                        "n": len(trials), "fires": fires, "frac": fires / len(trials)})
+    return results, unscored
+
+
+def rates(results):
+    """(self_use, false_fire): mean fire-fraction over should_fire=true and over should_fire=false
+    scenarios respectively. A label with no scenarios yields 0.0."""
+    pos = [r["frac"] for r in results if r["should_fire"]]
+    neg = [r["frac"] for r in results if not r["should_fire"]]
+    self_use = sum(pos) / len(pos) if pos else 0.0
+    false_fire = sum(neg) / len(neg) if neg else 0.0
+    return self_use, false_fire
+
+
+def worklist_line(r):
+    """A flagged scenario's worklist line, or None when it behaved correctly on every trial: a
+    should_fire=true scenario that did not fire on every trial is a [miss]; a should_fire=false scenario
+    that fired on any trial is a [false-fire]. The fired k/N count makes the miss reviewable."""
+    if r["should_fire"] and r["fires"] < r["n"]:
+        return "%s: [miss %s] fired %d/%d" % (r["id"], r["skill"], r["fires"], r["n"])
+    if not r["should_fire"] and r["fires"] > 0:
+        return "%s: [false-fire %s] fired %d/%d" % (r["id"], r["skill"], r["fires"], r["n"])
+    return None
+
+
+def load_baseline(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            base = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise InputError("baseline %s could not be read (%s)" % (path, exc))
+    missing = {"self_use_rate", "margin", "false_fire_bar"} - set(base)
+    if missing:
+        raise InputError("baseline %s is missing required fields: %s" % (path, ", ".join(sorted(missing))))
+    return base
+
+
+def gate(self_use, false_fire, base):
+    """Promote iff self-use clears baseline + margin AND false-fire stays within the bar; else hold,
+    naming which condition failed. Composes the lift and precision requirements into one verdict."""
+    need = base["self_use_rate"] + base["margin"]
+    lift_ok = self_use >= need
+    precision_ok = false_fire <= base["false_fire_bar"]
+    if lift_ok and precision_ok:
+        return True, ("self-use %.2f >= %.2f (baseline %.2f + margin %.2f) and false-fire %.2f <= bar %.2f"
+                      % (self_use, need, base["self_use_rate"], base["margin"], false_fire, base["false_fire_bar"]))
+    reasons = []
+    if not lift_ok:
+        reasons.append("self-use %.2f < %.2f (baseline %.2f + margin %.2f)"
+                       % (self_use, need, base["self_use_rate"], base["margin"]))
+    if not precision_ok:
+        reasons.append("false-fire %.2f > bar %.2f" % (false_fire, base["false_fire_bar"]))
+    return False, "; ".join(reasons)
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(prog=PROG, description="Deterministic scorer for the no-cue skill-activation eval.")
+    p.add_argument("--corpus", required=True, help="labeled scenario corpus (JSONL)")
+    p.add_argument("--runs", required=True, help="driver manifest (JSONL: one {id, trial, transcript} per trial)")
+    p.add_argument("--baseline", help="baseline artifact to gate against (promote/hold verdict)")
+    p.add_argument("--record-baseline", metavar="PATH", help="write a baseline artifact from these runs")
+    p.add_argument("--margin", type=float, help="lift margin to record (required with --record-baseline)")
+    p.add_argument("--bar", type=float, help="false-fire bar to record (required with --record-baseline)")
+    p.add_argument("--recorded-at", help="override the baseline recorded_at timestamp (deterministic testing)")
+    args = p.parse_args(argv)
+
+    if args.record_baseline and args.baseline:
+        warn("--record-baseline records C0 and cannot also gate against a baseline; pass only one")
+        return 2
+    if args.record_baseline and (args.margin is None or args.bar is None):
+        warn("--record-baseline requires --margin and --bar (the product-decision gate parameters)")
+        return 2
+
+    try:
+        scenarios = load_corpus(args.corpus)
+        runs = load_runs(args.runs)
+        results, unscored = score(scenarios, runs)
+    except (InputError, transcript.UnknownTranscriptSchema) as exc:
+        warn(str(exc))
+        return 2
+    except FileNotFoundError as exc:
+        warn("input not found: %s" % exc)
+        return 2
+
+    for r in sorted(results, key=lambda r: r["id"]):
+        line = worklist_line(r)
+        if line:
+            sys.stdout.write(line + "\n")
+
+    self_use, false_fire = rates(results)
+    n_trials = max((r["n"] for r in results), default=0)
+    warn("scored %d scenarios — self-use %.2f, false-fire %.2f%s"
+         % (len(results), self_use, false_fire,
+            (" (%d unscored: %s)" % (len(unscored), ", ".join(sorted(unscored)))) if unscored else ""))
+
+    if args.record_baseline:
+        artifact = {
+            "self_use_rate": self_use,
+            "false_fire_rate": false_fire,
+            "margin": args.margin,
+            "false_fire_bar": args.bar,
+            "n_trials": n_trials,
+            "recorded_at": args.recorded_at or datetime.datetime.now().isoformat(timespec="seconds"),
+        }
+        with open(args.record_baseline, "w", encoding="utf-8") as fh:
+            json.dump(artifact, fh, indent=2, sort_keys=True)
+            fh.write("\n")
+        warn("recorded baseline -> %s" % args.record_baseline)
+    elif args.baseline:
+        try:
+            base = load_baseline(args.baseline)
+        except InputError as exc:
+            warn(str(exc))
+            return 2
+        promote, why = gate(self_use, false_fire, base)
+        warn("verdict: %s (%s)" % ("PROMOTE" if promote else "HOLD", why))
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

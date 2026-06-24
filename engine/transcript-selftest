@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""transcript-selftest — behavioral tests for the scoped-skill firing reader (engine/transcript.py).
+
+Each test pins a property the reader must preserve (run after any change):
+  - a Skill tool_use block {name: Skill, input.skill: <scoped>} is detected as a firing;
+  - a top-level attributionSkill == <scoped> is detected as a firing — dual-keyed, either alone suffices;
+  - a non-scoped skill (Skill input.skill OR attributionSkill outside SCOPED_SKILLS) is NOT a firing;
+  - a clean transcript with no scoped firing returns the empty set (no false positive), and so does an
+    empty file (an empty transcript is valid, not a schema error);
+  - a firing INSIDE a sub-agent transcript (<uuid>/subagents/.../agent-*.jsonl) is found by
+    fired_in_session even when the main transcript is silent — the reader walks the subagents/ subdir,
+    recursively, and ignores the sibling *.meta.json;
+  - an UNRECOGNIZED transcript shape (a record missing the {type,...} envelope, or a non-JSON line)
+    raises UnknownTranscriptSchema — it FAILS LOUD, never silently reports 'no fire' (a silent schema
+    drift would otherwise corrupt every self-use / false-fire rate);
+  - SCOPED_SKILLS is the single-sourced scope the whole harness reads.
+
+Drives the real module by import (the engine library-test idiom, as engine/selftest unit-tests sources);
+fixtures are built in a tmpdir and torn down. Exit code is the contract: 0 all pass, 1 otherwise.
+"""
+import json
+import os
+import shutil
+import sys
+import tempfile
+
+ENGINE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, ENGINE)
+import transcript as T  # the real reader under test
+
+_checks = []
+
+
+def check(name, ok, detail=""):
+    _checks.append(bool(ok))
+    print("  %s %s%s" % ("PASS" if ok else "FAIL", name, ("  — " + str(detail)) if detail and not ok else ""))
+
+
+def write_jsonl(path, records):
+    """Write records as JSONL; a str element is written verbatim (for malformed-line fixtures)."""
+    with open(path, "w", encoding="utf-8") as fh:
+        for r in records:
+            fh.write(r if isinstance(r, str) else json.dumps(r))
+            fh.write("\n")
+
+
+def raises_unknown(path):
+    try:
+        T.fired_in_transcript(path)
+        return False
+    except T.UnknownTranscriptSchema:
+        return True
+
+
+def main():
+    root = tempfile.mkdtemp(prefix="transcript-selftest-")
+    try:
+        # ---- single-transcript detection, dual-keyed ----
+        skill_use = {"type": "assistant", "uuid": "u1", "message": {"role": "assistant", "content": [
+            {"type": "text", "text": "Context is heavy; let me compact."},
+            {"type": "tool_use", "id": "toolu_x", "name": "Skill",
+             "input": {"skill": "compact-focus", "args": "focus"}, "caller": {"type": "direct"}}]}}
+        firing = os.path.join(root, "firing.jsonl")
+        write_jsonl(firing, [{"type": "user", "message": {"role": "user", "content": "go"}}, skill_use])
+        check("Skill tool_use firing detected (dual-key 1)",
+              T.fired_in_transcript(firing) == {"compact-focus"}, T.fired_in_transcript(firing))
+
+        att_handoff = {"type": "assistant", "attributionSkill": "handoff",
+                       "message": {"role": "assistant", "content": [{"type": "text", "text": "Handing off."}]}}
+        attf = os.path.join(root, "attr.jsonl")
+        write_jsonl(attf, [att_handoff])
+        check("attributionSkill firing detected (dual-key 2)",
+              T.fired_in_transcript(attf) == {"handoff"}, T.fired_in_transcript(attf))
+
+        # non-firing: a non-scoped Skill invocation + a non-scoped attributionSkill + an ordinary tool
+        clean = [
+            {"type": "user", "message": {"role": "user", "content": "do x"}},
+            {"type": "assistant", "attributionSkill": "impl", "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "Skill", "input": {"skill": "context-engineering-knowledge-base"}},
+                {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}}]}},
+            {"type": "mode", "mode": "default"},
+        ]
+        cleanf = os.path.join(root, "clean.jsonl")
+        write_jsonl(cleanf, clean)
+        check("clean transcript -> empty set (no false fire)",
+              T.fired_in_transcript(cleanf) == set(), T.fired_in_transcript(cleanf))
+        check("non-scoped skill (Skill input.skill / attributionSkill) is NOT a firing",
+              T.fired_in_transcript(cleanf) == set())
+
+        emptyf = os.path.join(root, "empty.jsonl")
+        write_jsonl(emptyf, [])
+        check("empty transcript -> empty set (valid, not a schema error)",
+              T.fired_in_transcript(emptyf) == set(), T.fired_in_transcript(emptyf))
+
+        # ---- sub-agent firing via fired_in_session ----
+        sess_dir = os.path.join(root, "proj")
+        os.makedirs(sess_dir)
+        uuid = "11111111-2222-3333-4444-555555555555"
+        main_tx = os.path.join(sess_dir, uuid + ".jsonl")
+        write_jsonl(main_tx, clean)  # main run is silent
+        subdir = os.path.join(sess_dir, uuid, "subagents", "workflows", "wf_demo")  # nested like a real workflow run
+        os.makedirs(subdir)
+        write_jsonl(os.path.join(subdir, "agent-abc.jsonl"), [att_handoff])  # handoff fires inside the sub-agent
+        with open(os.path.join(subdir, "agent-abc.meta.json"), "w", encoding="utf-8") as fh:
+            fh.write('{"not":"a transcript"}\n')  # sibling meta must be ignored
+        check("main transcript alone is silent", T.fired_in_transcript(main_tx) == set(), T.fired_in_transcript(main_tx))
+        check("fired_in_session walks subagents/ (recursively) and finds the sub-agent firing",
+              T.fired_in_session(main_tx) == {"handoff"}, T.fired_in_session(main_tx))
+
+        # ---- fail-loud on unrecognized schema (never silent 'no fire') ----
+        notype = os.path.join(root, "notype.jsonl")
+        write_jsonl(notype, ['{"message": {"role": "assistant"}}'])  # valid JSON object, but no "type"
+        check("record missing the {type,...} envelope -> UnknownTranscriptSchema (fails loud)",
+              raises_unknown(notype))
+        badjson = os.path.join(root, "bad.jsonl")
+        write_jsonl(badjson, ["this is not json"])
+        check("non-JSON line -> UnknownTranscriptSchema (fails loud)", raises_unknown(badjson))
+        nonobj = os.path.join(root, "nonobj.jsonl")
+        write_jsonl(nonobj, ["[1, 2, 3]"])  # valid JSON, not an object
+        check("non-object JSON line -> UnknownTranscriptSchema (fails loud)", raises_unknown(nonobj))
+
+        # ---- single-sourced scope ----
+        check("SCOPED_SKILLS is the single-sourced scope (compact-focus, handoff)",
+              tuple(T.SCOPED_SKILLS) == ("compact-focus", "handoff"), T.SCOPED_SKILLS)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    passed = sum(1 for ok in _checks if ok)
+    total = len(_checks)
+    print("\n%s: %d/%d checks passed" % ("PASS" if passed == total else "FAIL", passed, total))
+    return 0 if passed == total else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
