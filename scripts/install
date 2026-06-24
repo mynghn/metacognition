@@ -8,30 +8,24 @@ no privileged agent, the providers never diverge. Replaces the chezmoi
 `.chezmoitemplates` single-sourcing.
 
 It does five things: render each sibling's adapter and deploy the byte-identical adapter to
-every runtime dir; emit the tier-gated discovery wiring — the `description` into each adapter
-always, plus, for Everyday-tier siblings only, a named trigger block upserted into the shared
-`AGENTS.md` (which both `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` symlink to; `tier` comes
-from the per-sibling config); set up the vault — ensure it is a git repo ROOT and record its
-location where the engine resolves it, so a clean clone-and-install needs no personal config; and
+every runtime dir; set up the vault — ensure it is a git repo ROOT and record its
+location where the engine resolves it, so a clean clone-and-install needs no personal config;
 deploy the family-level skills (`metacognition-maintenance`, `metacognition-freshness`) byte-identical
 to every runtime dir, baking their engine/policy/registry `@`-tokens absolute (they are multi-file
 skills copied as-is, not template-rendered adapters; no scheduler is installed — discovery is their
-`SKILL.md` description alone, so nothing runs unattended); and deploy the authored practice skills (`handoff`,
-`compact-focus`) under `skills/practice/<name>/` — each skill is SHARED by default (one
-`<name>/SKILL.md` deployed byte-identical to every runtime dir) and PER-VENDOR only by exception
-(`<name>/<provider>/SKILL.md`, one body per provider, when a runtime primitive forces the bodies
-apart — see `skills/practice/README.md`); `@VAULT@` baked either way, plus one shared
-provider-neutral activation block upserted into `AGENTS.md`. The body's engine/config/vault paths are baked absolute at install time,
-so a rendered adapter (and the maintenance skill) is machine-specific while its source stays generic.
+`SKILL.md` description alone, so nothing runs unattended); and deploy the authored practice skills
+(`handoff`, `compact-focus`) under `skills/practice/<name>/` — each skill is SHARED by default
+(one `<name>/SKILL.md` deployed byte-identical to every runtime dir) and PER-VENDOR only by
+exception (`<name>/<provider>/SKILL.md`, one body per provider, when a runtime primitive forces
+the bodies apart — see `skills/practice/README.md`); `@VAULT@` baked either way.
 
-The AGENTS.md emission is SURGICAL: it inserts-or-replaces only its own named `<tag>...</tag>`
-span and leaves every other block (the user's operating instructions) byte-for-byte untouched,
-idempotent on re-run — it never rewrites the file. With the default `--dest ~` the shared file is
-the live `~/AGENTS.md`, which on a personal machine stays chezmoi-managed — so test against a
-`--dest <sandbox>`, not the live file. The vault setup likewise writes a live file —
-`$XDG_CONFIG_HOME/metacognition/vault` (the real `~/.config` when XDG is unset) — and git-inits
-`--vault`; these are gated by `$XDG_CONFIG_HOME` / `--vault`, NOT `--dest`, so testing must
-sandbox ALL THREE (`--dest`, `$XDG_CONFIG_HOME`, and a sandbox `--vault`).
+The AGENTS.md emission is optional and SURGICAL: when enabled, it inserts-or-replaces only its own
+named `<tag>...</tag>` span and leaves every other block (the user's operating instructions)
+byte-for-byte untouched, idempotent on re-run — it never rewrites the file. Without the flag,
+a working install sets up vault+skills and leaves AGENTS.md untouched. The vault setup likewise
+writes a live file — `$XDG_CONFIG_HOME/metacognition/vault` (the real `~/.config` when XDG is
+unset) — and git-inits `--vault`; these are gated by `$XDG_CONFIG_HOME` / `--vault`, NOT
+`--dest`, so testing must sandbox ALL THREE (`--dest`, `$XDG_CONFIG_HOME`, and a sandbox `--vault`).
 
 The install is ADDITIVE: it writes/overwrites the current siblings' adapters but does not prune
 adapters for removed/renamed siblings — retiring a stale adapter is a manual cutover step.
@@ -50,6 +44,7 @@ TIERS = ("everyday", "common", "situational")  # discovery-wiring gate; only `ev
 MAINTENANCE = "metacognition-maintenance"  # the family-level maintenance skill (multi-file, token-baked)
 FRESHNESS = "metacognition-freshness"  # read-only freshness check + confirmed-update instructions
 FAMILY_SKILLS = (MAINTENANCE, FRESHNESS)
+PROFILES = ("minimal", "activated", "contributor")
 PRACTICE_DIR = "practice"  # skills/practice/<name>/[<provider>/]SKILL.md + a shared agents.md per skill
 PROVIDER_SUBDIR = {".claude": "claude", ".agents": "codex"}  # per-vendor source subdir (when a skill diverges)
 PRE_COMMIT_SENTINEL = "# metacognition selftest-gate sentinel start"
@@ -362,8 +357,8 @@ def practice_sources(sdir, name):
     return per_vendor
 
 
-def deploy_practice_skill(dest, vault, name):
-    """Deploy one authored practice skill, then upsert its single shared, provider-neutral activation
+def deploy_practice_skill(dest, vault, name, with_anchors=False):
+    """Deploy one authored practice skill, then (optionally) upsert its shared, provider-neutral activation
     block into the shared AGENTS.md. The body layout is resolved by practice_sources(): a SHARED
     `<name>/SKILL.md` goes byte-identical to every runtime dir (the default), while a PER-VENDOR skill
     ships each runtime kind its own `<provider>/SKILL.md` (frontmatter and body diverge by runtime — e.g.
@@ -385,7 +380,7 @@ def deploy_practice_skill(dest, vault, name):
                              % (provider, name, dest, err))
     tag = None
     agents_md = os.path.join(sdir, "agents.md")
-    if os.path.isfile(agents_md):
+    if with_anchors and os.path.isfile(agents_md):
         block = open(agents_md, encoding="utf-8").read().rstrip("\n")
         tag = upsert_agents_block(os.path.join(dest, "AGENTS.md"), block)
     print("install: %s -> %s%s"
@@ -393,24 +388,17 @@ def deploy_practice_skill(dest, vault, name):
              ("  (AGENTS.md <%s>)" % tag) if tag else ""))
 
 
-def should_install_pre_commit(choice, only):
-    """Resolve the optional local hook setup UX.
+def should_install_pre_commit(choice, with_dev_hooks):
+    """Resolve the optional local hook setup.
 
-    Explicit flags are authoritative. Without a flag, prompt only for an interactive full install;
-    scripted installs and surgical --only runs do not surprise the caller with a local Git hook.
-    A previously installed managed hook is an already-satisfied guard, so skip the prompt."""
+    Explicit flags are authoritative. Without a flag, default behavior is skip.
+    A previously installed managed hook is an already-satisfied guard."""
     if choice is not None:
         return choice
     if managed_pre_commit_installed():
         print("install: local pre-commit hook already installed")
         return False
-    if only or not (sys.stdin.isatty() and sys.stdout.isatty()):
-        return False
-    print("\nOptional local guard:")
-    print("  Run ./selftest-gate --staged before commits.")
-    print("  Existing hooks are preserved and chained.")
-    answer = input("Install local pre-commit hook? [y/N] ").strip().lower()
-    return answer in ("y", "yes")
+    return bool(with_dev_hooks)
 
 
 def managed_pre_commit_installed():
@@ -443,11 +431,18 @@ def main():
     p.add_argument("--vault", default=DEFAULT_VAULT, help="vault repo path — baked into adapters, "
                    "git-initialised as a repo root, and recorded for the engine (default: %s)" % DEFAULT_VAULT)
     p.add_argument("--only", help="install just this sibling (config/ stem or full skill name)")
+    p.add_argument("--with-anchors", action="store_true",
+                   help="also inject AGENTS.md trigger blocks for discoverability")
+    p.add_argument("--with-dev-hooks", action="store_true",
+                   help="also install local pre-commit selftest hook")
+    p.add_argument("--profile", default="minimal", choices=PROFILES,
+                   help="installation profile (default: minimal): minimal=skills+vault only; "
+                        "activated=with anchors; contributor=with anchors + dev hook")
     hook = p.add_mutually_exclusive_group()
     hook.add_argument("--install-pre-commit", dest="install_pre_commit", action="store_true",
                       help="also install the optional local pre-commit selftest gate")
     hook.add_argument("--no-install-pre-commit", dest="install_pre_commit", action="store_false",
-                      help="do not prompt for or install the optional local pre-commit selftest gate")
+                      help="do not install the optional local pre-commit selftest gate")
     p.set_defaults(install_pre_commit=None)
     args = p.parse_args()
     dest = os.path.expanduser(args.dest)
@@ -456,6 +451,10 @@ def main():
     # location. (render_adapter only expanduser'd, so a relative --vault used to bake a relative path
     # there while the engine recorded an absolute one — a latent mismatch.)
     args.vault = os.path.abspath(os.path.expanduser(args.vault))
+    with_anchors = bool(args.with_anchors or args.profile in ("activated", "contributor"))
+    with_dev_hooks = bool(args.with_dev_hooks or args.profile == "contributor")
+    if args.install_pre_commit is not None:
+        with_dev_hooks = bool(args.install_pre_commit)
 
     only = args.only
     if only and only.endswith("-knowledge-base"):
@@ -483,7 +482,7 @@ def main():
                 raise SystemExit("install: cannot write %s/skills/%s/SKILL.md under --dest %s — %s"
                                  % (provider, name, dest, err))
         print("install: %s -> %s" % (name, ", ".join("%s/skills/%s/SKILL.md" % (pr, name) for pr in PROVIDERS)))
-        if block is not None:
+        if with_anchors and block is not None:
             tag = upsert_agents_block(agents_path, block)
             print("install: AGENTS.md <%s> trigger block -> %s" % (tag, agents_path))
 
@@ -501,12 +500,17 @@ def main():
     # family-level practice skills: a full run, or an explicit `--only <practice-name>`, deploys them;
     # a surgical `--only <sibling>` / `--only metacognition-maintenance` leaves them alone.
     for name in (practice if not only else ([only] if only in practice else [])):
-        deploy_practice_skill(dest, vault, name)
+        deploy_practice_skill(dest, vault, name, with_anchors)
 
-    if should_install_pre_commit(args.install_pre_commit, only):
+    if with_anchors:
+        print("install: AGENTS.md anchors enabled (opt-in discovery blocks injected)")
+    else:
+        print("install: AGENTS.md anchors not installed (run with --with-anchors or --profile activated)")
+
+    if should_install_pre_commit(args.install_pre_commit, with_dev_hooks):
         install_pre_commit_hook()
     else:
-        print("install: local pre-commit hook not installed (run ./selftest-gate --install-pre-commit to enable)")
+        print("install: local pre-commit hook not installed (run with --with-dev-hooks, or --install-pre-commit)")
 
 
 if __name__ == "__main__":
