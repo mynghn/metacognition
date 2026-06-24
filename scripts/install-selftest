@@ -739,6 +739,15 @@ def main():
         hook = os.path.join(hook_root, ".git", "hooks", "pre-commit")
         check("pre-commit setup: non-interactive install skips by default",
               r.returncode == 0 and not os.path.exists(hook) and "not installed" in r.stdout, r.stderr)
+
+        r = run_hook_install(["--with-dev-hooks", "--no-install-pre-commit"])
+        check("pre-commit setup: --no-install-pre-commit excludes pre-commit when bulk dev-hook opt-in is on",
+              r.returncode == 0 and not os.path.exists(hook) and "not installed" in r.stdout, r.stderr)
+
+        r = run_hook_install(["--profile", "contributor", "--no-install-pre-commit"])
+        check("pre-commit setup: --no-install-pre-commit overrides contributor profile",
+              r.returncode == 0 and not os.path.exists(hook) and "not installed" in r.stdout, r.stderr)
+
         r = run_hook_install(["--install-pre-commit"])
         hook_text = open(hook, encoding="utf-8").read() if os.path.isfile(hook) else ""
         check("pre-commit setup: explicit flag installs the managed hook",

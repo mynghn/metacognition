@@ -48,6 +48,7 @@ PROFILES = ("minimal", "activated", "contributor")
 PRACTICE_DIR = "practice"  # skills/practice/<name>/[<provider>/]SKILL.md + a shared agents.md per skill
 PROVIDER_SUBDIR = {".claude": "claude", ".agents": "codex"}  # per-vendor source subdir (when a skill diverges)
 PRE_COMMIT_SENTINEL = "# metacognition selftest-gate sentinel start"
+KNOWN_DEV_HOOKS = ("pre-commit",)
 
 
 def parse_kv(path):
@@ -388,7 +389,7 @@ def deploy_practice_skill(dest, vault, name, with_anchors=False):
              ("  (AGENTS.md <%s>)" % tag) if tag else ""))
 
 
-def should_install_pre_commit(choice, with_dev_hooks):
+def should_install_pre_commit(choice, install_pre_commit_default):
     """Resolve the optional local hook setup.
 
     Explicit flags are authoritative. Without a flag, default behavior is skip.
@@ -398,7 +399,7 @@ def should_install_pre_commit(choice, with_dev_hooks):
     if managed_pre_commit_installed():
         print("install: local pre-commit hook already installed")
         return False
-    return bool(with_dev_hooks)
+    return bool(install_pre_commit_default)
 
 
 def managed_pre_commit_installed():
@@ -434,7 +435,7 @@ def main():
     p.add_argument("--with-anchors", action="store_true",
                    help="also inject AGENTS.md trigger blocks for discoverability")
     p.add_argument("--with-dev-hooks", action="store_true",
-                   help="also install local pre-commit selftest hook")
+                   help="also install local dev hooks (currently pre-commit selftest hook)")
     p.add_argument("--profile", default="minimal", choices=PROFILES,
                    help="installation profile (default: minimal): minimal=skills+vault only; "
                         "activated=with anchors; contributor=with anchors + dev hook")
@@ -452,9 +453,10 @@ def main():
     # there while the engine recorded an absolute one — a latent mismatch.)
     args.vault = os.path.abspath(os.path.expanduser(args.vault))
     with_anchors = bool(args.with_anchors or args.profile in ("activated", "contributor"))
-    with_dev_hooks = bool(args.with_dev_hooks or args.profile == "contributor")
+    install_dev_hooks = bool(args.with_dev_hooks or args.profile == "contributor")
+    install_pre_commit_default = bool("pre-commit" in KNOWN_DEV_HOOKS and install_dev_hooks)
     if args.install_pre_commit is not None:
-        with_dev_hooks = bool(args.install_pre_commit)
+        install_pre_commit_default = bool(args.install_pre_commit)
 
     only = args.only
     if only and only.endswith("-knowledge-base"):
@@ -507,7 +509,7 @@ def main():
     else:
         print("install: AGENTS.md anchors not installed (run with --with-anchors or --profile activated)")
 
-    if should_install_pre_commit(args.install_pre_commit, with_dev_hooks):
+    if should_install_pre_commit(args.install_pre_commit, install_pre_commit_default):
         install_pre_commit_hook()
     else:
         print("install: local pre-commit hook not installed (run with --with-dev-hooks, or --install-pre-commit)")
