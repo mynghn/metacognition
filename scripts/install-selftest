@@ -6,10 +6,11 @@ idempotent re-run, stray/dotfiles in config/ skipped (not mis-treated as sibling
 errors (no Python tracebacks) for an unknown --only / a config missing a required field / a
 sibling with no discovery description.
 
-Tier-gated AGENTS.md trigger blocks: an Everyday-tier sibling gets its named block emitted
-byte-exact into the shared AGENTS.md; a Situational sibling gets none; the upsert is SURGICAL
-(replaces only its own <tag>...</tag> span, preserves every other block) and idempotent; and a
-tier=everyday sibling missing its block file is a clean error.
+Tier-gated AGENTS.md trigger blocks: by default they are not emitted. With `--with-anchors`, an
+Everyday-tier sibling gets its named block emitted byte-exact into the shared AGENTS.md; a
+Situational sibling gets none; the upsert is SURGICAL (replaces only its own <tag>...</tag> span,
+preserves every other block) and idempotent; and a tier=everyday sibling missing its block file is
+a clean error.
 
 Vault setup: the installer git-inits the vault as a repo ROOT, records its location at
 $XDG_CONFIG_HOME/metacognition/vault, and the engine then resolves that vault with no
@@ -23,11 +24,12 @@ yet is left untouched by a surgical `--only <sibling>`, and a file with an unbak
 
 Practice-skill lane: a full install deploys the authored practice skills (handoff, compact-focus). The lane is
 SHARED-by-default (one <name>/SKILL.md byte-identical to both providers) and PER-VENDOR by exception
-(<name>/<provider>/SKILL.md when a runtime primitive forces the bodies apart), @VAULT@ baked either way, plus a shared
-provider-neutral activation block upserted into AGENTS.md. Covered here: a shared SKILL.md reaches both providers
+(<name>/<provider>/SKILL.md when a runtime primitive forces the bodies apart), @VAULT@ baked either way.
+Activation blocks are now opt-in with `--with-anchors`; covered here: a shared SKILL.md reaches both providers
 byte-identical; per-vendor bodies reach their own runtime; a shared + per-provider layout together is a clean error;
-set-keyed discovery picks up a new skills/practice/<x>/ dir with no code change; the activation upsert is surgical +
-idempotent; `--only <practice>` deploys just it; a surgical `--only <sibling>` leaves them alone; and an unbakeable
+set-keyed discovery picks up a new skills/practice/<x>/ dir with no code change; when anchors are enabled the
+activation upsert is surgical + idempotent; `--only <practice>` deploys just it; a surgical `--only <sibling>` leaves
+them alone; and an unbakeable
 @TOKEN@ is a clean error.
 
 Vendor-divergence gate: each per-vendor skill ships a golden `vendor-divergence` snapshot (content-not-position — the
@@ -36,7 +38,7 @@ a reconcile-toward-shared both fail until the snapshot is intentionally regenera
 --update-divergence`); a semantic check forbids any Claude-only primitive ($ARGUMENTS, `/compact <focus>`) in a Codex body.
 
 Local hook setup: the main installer exposes the selftest gate's pre-commit hook as opt-in setup UX. Non-interactive
-installs skip it by default; an already-installed managed hook suppresses the prompt; `--install-pre-commit` installs it;
+installs skip it by default; an already-installed managed hook returns false without side effects; `--install-pre-commit` installs it;
 and an existing unmanaged hook is preserved and chained.
 """
 import importlib.util
@@ -314,7 +316,7 @@ def main():
 
         d_ps = tempfile.mkdtemp(prefix="kb-install-")
         try:
-            r = run(["--dest", d_ps])
+            r = run(["--dest", d_ps, "--with-anchors"])
             check("practice: install exits 0", r.returncode == 0, r.stderr)
             for name in PRACTICE:
                 c = os.path.join(d_ps, ".claude", "skills", name, "SKILL.md")
@@ -344,7 +346,7 @@ def main():
             check("practice: activation provider-neutral (no 'On Claude')", "On Claude" not in agp)
             # idempotent re-run (bodies + AGENTS.md)
             snap = {n: read(d_ps, ".claude", n) for n in PRACTICE}
-            run(["--dest", d_ps])
+            run(["--dest", d_ps, "--with-anchors"])
             check("practice: idempotent re-run (bodies)", all(read(d_ps, ".claude", n) == snap[n] for n in PRACTICE))
             check("practice: idempotent re-run (AGENTS.md)",
                   open(os.path.join(d_ps, "AGENTS.md"), encoding="utf-8").read() == agp)
@@ -462,7 +464,7 @@ def main():
                 "<user_sentinel>\nkeep me\n</user_sentinel>\n\n"
                 "<handoff>\nSTALE HANDOFF\n</handoff>\n\n"
                 "<closing_sentinel>\nkeep me too\n</closing_sentinel>\n")
-            run(["--dest", d_surgp, "--only", "handoff"])
+            run(["--dest", d_surgp, "--only", "handoff", "--with-anchors"])
             out = open(agp2, encoding="utf-8").read()
             check("practice surgical: user blocks preserved",
                   "<user_sentinel>\nkeep me\n</user_sentinel>" in out and "<closing_sentinel>\nkeep me too\n</closing_sentinel>" in out)
@@ -559,14 +561,14 @@ def main():
         # everyday siblings -> block emitted byte-exact into the shared AGENTS.md; idempotent
         d_ev = tempfile.mkdtemp(prefix="kb-install-")
         try:
-            run(["--dest", d_ev])
+            run(["--dest", d_ev, "--with-anchors"])
             ag = os.path.join(d_ev, "AGENTS.md")
             txt = open(ag, encoding="utf-8").read() if os.path.isfile(ag) else ""
             check("everyday: AGENTS.md created", os.path.isfile(ag))
             check("everyday: CE block byte-exact", CE in txt)
             check("everyday: PE block byte-exact", PE in txt)
             check("everyday: no situational block", "<tool_design>" not in txt)
-            run(["--dest", d_ev])
+            run(["--dest", d_ev, "--with-anchors"])
             check("AGENTS.md idempotent re-run", os.path.isfile(ag) and open(ag, encoding="utf-8").read() == txt)
         finally:
             shutil.rmtree(d_ev, ignore_errors=True)
@@ -582,7 +584,7 @@ def main():
         # --only an everyday sibling emits ONLY that block
         d_one = tempfile.mkdtemp(prefix="kb-install-")
         try:
-            run(["--dest", d_one, "--only", "context-engineering"])
+            run(["--dest", d_one, "--only", "context-engineering", "--with-anchors"])
             txt = open(os.path.join(d_one, "AGENTS.md"), encoding="utf-8").read()
             check("--only CE: CE block present", CE in txt)
             check("--only CE: PE block absent", "<prompt_engineering>" not in txt)
@@ -597,7 +599,7 @@ def main():
                 "<user_sentinel>\nhand-written, must survive\n</user_sentinel>\n\n"
                 "<context_engineering>\nSTALE BODY\n</context_engineering>\n\n"
                 "<closing_sentinel>\nalso keep\n</closing_sentinel>\n")
-            run(["--dest", d_surg, "--only", "context-engineering"])
+            run(["--dest", d_surg, "--only", "context-engineering", "--with-anchors"])
             out = open(ag, encoding="utf-8").read()
             check("surgical: leading user block preserved", "<user_sentinel>\nhand-written, must survive\n</user_sentinel>" in out)
             check("surgical: trailing user block preserved", "<closing_sentinel>\nalso keep\n</closing_sentinel>" in out)
@@ -614,7 +616,7 @@ def main():
             open(ag, "w", encoding="utf-8").write(
                 "<note>\nSee the <context_engineering> idea inline.\n</note>\n\n"
                 "<context_engineering>\nSTALE\n</context_engineering>\n")
-            run(["--dest", d_p8, "--only", "context-engineering"])
+            run(["--dest", d_p8, "--only", "context-engineering", "--with-anchors"])
             out = open(ag, encoding="utf-8").read()
             check("inline tag mention: neighbour block intact",
                   "<note>\nSee the <context_engineering> idea inline.\n</note>" in out)
@@ -630,7 +632,7 @@ def main():
         open(wbc, "w").write("description = probe\n")
         open(wbcb, "w").write("hello </_selftest_badbody> world\n")
         try:
-            r = run(["--dest", dest, "--only", "_selftest_badbody"])
+            r = run(["--dest", dest, "--only", "_selftest_badbody", "--with-anchors"])
             check("body with embedded close tag: clean error",
                   r.returncode != 0 and "closing tag" in r.stderr and "Traceback" not in r.stderr, r.stderr)
         finally:
@@ -647,7 +649,7 @@ def main():
         open(wnl, "w").write("description = probe\n")
         open(wnlb, "w").write("LINE ONE\nLINE TWO\n\n\n")  # 3 trailing newlines
         try:
-            run(["--dest", d_nl, "--only", "_selftest_nl"])
+            run(["--dest", d_nl, "--only", "_selftest_nl", "--with-anchors"])
             out = open(os.path.join(d_nl, "AGENTS.md"), encoding="utf-8").read()
             check("body trailing-newlines normalised to one",
                   "<_selftest_nl>\nLINE ONE\nLINE TWO\n</_selftest_nl>" in out)
@@ -663,7 +665,7 @@ def main():
         open(tt, "w").write("stem = _selftest_tier_typo\nindex_heading = X\ntier = everydy\n")
         open(wtt, "w").write("description = probe\n")
         try:
-            r = run(["--dest", dest, "--only", "_selftest_tier_typo"])
+            r = run(["--dest", dest, "--only", "_selftest_tier_typo", "--with-anchors"])
             check("tier typo: clean error",
                   r.returncode != 0 and "must be one of" in r.stderr and "Traceback" not in r.stderr, r.stderr)
         finally:
@@ -676,7 +678,7 @@ def main():
         open(bk, "w").write("stem = _selftest_everyday_noblock\nindex_heading = X\ntier = everyday\n")
         open(wbk, "w").write("description = probe\n")
         try:
-            r = run(["--dest", dest, "--only", "_selftest_everyday_noblock"])
+            r = run(["--dest", dest, "--only", "_selftest_everyday_noblock", "--with-anchors"])
             check("everyday w/o block file: clean error",
                   r.returncode != 0 and "trigger block" in r.stderr and "Traceback" not in r.stderr, r.stderr)
         finally:
@@ -737,6 +739,15 @@ def main():
         hook = os.path.join(hook_root, ".git", "hooks", "pre-commit")
         check("pre-commit setup: non-interactive install skips by default",
               r.returncode == 0 and not os.path.exists(hook) and "not installed" in r.stdout, r.stderr)
+
+        r = run_hook_install(["--with-dev-hooks", "--no-install-pre-commit"])
+        check("pre-commit setup: --no-install-pre-commit excludes pre-commit when bulk dev-hook opt-in is on",
+              r.returncode == 0 and not os.path.exists(hook) and "not installed" in r.stdout, r.stderr)
+
+        r = run_hook_install(["--profile", "contributor", "--no-install-pre-commit"])
+        check("pre-commit setup: --no-install-pre-commit overrides contributor profile",
+              r.returncode == 0 and not os.path.exists(hook) and "not installed" in r.stdout, r.stderr)
+
         r = run_hook_install(["--install-pre-commit"])
         hook_text = open(hook, encoding="utf-8").read() if os.path.isfile(hook) else ""
         check("pre-commit setup: explicit flag installs the managed hook",
@@ -753,22 +764,22 @@ def main():
                 return True
 
             def readline(self, *args, **kwargs):
-                raise AssertionError("already-installed hook should suppress the prompt")
+                raise AssertionError("already-installed hook should bypass any input path")
 
         old_stdin, old_stdout = sys.stdin, sys.stdout
-        prompt_result = None
+        decision = None
         prompt_out = TtyNoInput()
         prompt_error = ""
         try:
             sys.stdin = TtyNoInput()
             sys.stdout = prompt_out
-            prompt_result = install_under_test.should_install_pre_commit(None, None)
+            decision = install_under_test.should_install_pre_commit(None, False)
         except Exception as err:
             prompt_error = str(err)
         finally:
             sys.stdin, sys.stdout = old_stdin, old_stdout
-        check("pre-commit setup: already-installed managed hook suppresses prompt",
-              prompt_result is False and "already installed" in prompt_out.getvalue() and not prompt_error,
+        check("pre-commit setup: no prompt by default in non-interactive mode",
+              decision is False and not prompt_error,
               prompt_error or prompt_out.getvalue())
 
         hook_root_existing = os.path.join(sb, "hook-install-existing")

@@ -314,12 +314,12 @@ def main():
         check("G3: engine operates on the new sibling via the recorded vault",
               e.returncode == 0 and os.path.abspath(vault) in e.stdout, (e.stdout + e.stderr))
 
-        # everyday sibling -> the generated draft .agents.md drives an AGENTS.md trigger block
+        # everyday sibling -> default install is lightweight: AGENTS.md remains untouched unless opt-in is requested
         r = gen(["selftest-g3e", "--tier", "everyday", "--env-prefix", "SE3",
                  "--scope", "a probe", "--description", "A probe everyday description."] + common)
         ag = os.path.join(dest, "AGENTS.md")
-        check("G3: everyday tier -> AGENTS.md trigger block emitted",
-              r.returncode == 0 and os.path.isfile(ag) and "<selftest_g3e>" in open(ag, encoding="utf-8").read(), (r.stdout + r.stderr))
+        check("G3: everyday tier -> AGENTS.md not emitted by default",
+              r.returncode == 0 and not os.path.isfile(ag), (r.stdout + r.stderr))
         check("G3: everyday sibling generated its draft .agents.md block",
               os.path.isfile(os.path.join(rwir, "selftest-g3e.agents.md")))
 

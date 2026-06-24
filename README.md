@@ -21,14 +21,14 @@ metacognition/
 ├── wiring/            discovery-wiring source — per-sibling description + tier-gated AGENTS.md block
 ├── skills/            authored family/practice skills deployed by the installer
 └── install            the installer — renders adapters from templates/ + config/ + wiring/ and
-                       deploys them into agent runtimes (plus skills, AGENTS.md wiring, and vault setup)
+                       deploys them into agent runtimes (plus vault setup; AGENTS.md wiring optional)
 ```
 
 Each directory carries a `README.md` naming its role. Together the engine, configs, templates, wiring, and installer are the family's shared machinery.
 
 ## Install
 
-A plain installer deploys each sibling's `SKILL.md` adapter into `~/.claude/skills/<name>/` and `~/.agents/skills/<name>/`, emits the discovery wiring, records where the vault lives, and ships Metacognition-owned maintenance/freshness skills — no plugin, no privileged agent. On personal machines, chezmoi may bootstrap clones, but it is only a consumer of the installer, not this framework's home.
+A plain installer deploys each sibling's `SKILL.md` adapter into `~/.claude/skills/<name>/` and `~/.agents/skills/<name>/`, records where the vault lives, and ships Metacognition-owned maintenance/freshness skills — no plugin, no privileged agent. By default `AGENTS.md` discovery anchors and the local pre-commit hook are opt-in; use `--with-anchors`, `--with-dev-hooks`, or `--profile activated` / `--profile contributor` as needed. On personal machines, chezmoi may bootstrap clones, but it is only a consumer of the installer, not this framework's home.
 
 ## License
 
