@@ -70,6 +70,23 @@ if [ -d "$TOOL/config" ]; then
   [ "$missing" = 0 ] && echo "[adapters]  ok  every configured sibling has Claude + Codex adapters"
 fi
 
+# Reference integrity: every consumer->vault pointer must still resolve — the same
+# "is my install valid" axis as adapter parity, so one freshness run covers it. check-refs
+# is read-only; fold its exit/output into the verdict (** when any pointer dangles).
+refs_bin="$TOOL/scripts/check-refs"
+if [ -x "$refs_bin" ]; then
+  refs_out="$("$refs_bin" --vault "$VAULT" 2>/dev/null)"
+  case $? in
+    0) echo "[refs]      ok  every consumer->vault reference resolves" ;;
+    1) printf '[refs]      ** %d dangling consumer->vault reference(s) — fix the pointer or restore the entry:\n' \
+         "$(printf '%s\n' "$refs_out" | grep -c .)"
+       printf '%s\n' "$refs_out" | sed 's/^/              /' ;;
+    *) echo "[refs]     n/a  check-refs could not run (vault unreachable)" ;;
+  esac
+else
+  echo "[refs]     n/a  check-refs not found at $refs_bin"
+fi
+
 echo "========================================================================"
 echo "Fix (after review, only if flagged **):"
 echo "  git -C $TOOL pull --ff-only \\"
