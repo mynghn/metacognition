@@ -6,8 +6,11 @@ a throwaway scan tree + vault via --scan-root / --vault, so nothing touches the 
   - a baked specific-entry reference whose target entry is MISSING is reported as
     `<consumer>: <topic>/knowledge/<slug>.md`, exit nonzero; a resolving one is not reported;
   - when every referenced target exists, nothing is reported, exit 0;
-  - complete-by-construction: a NEW consumer dropped anywhere under the scan root is covered
-    with no registration step, and EVERY dangler in one run is reported, not just the first;
+  - complete-by-construction: a NEW deployed consumer (a practice SKILL.md, a family-skill file)
+    is covered with no registration step, and EVERY dangler in one run is reported, not just first;
+  - coverage is the DEPLOYED surfaces only: a non-deployed sibling under a skill dir (a
+    vendor-divergence golden snapshot, a README, an un-baked agents.md) is out of scope and never
+    flagged, while every file under a metacognition-* family skill IS scanned;
   - read-only: a run leaves the scanned tree AND the vault byte-for-byte unchanged (no writes,
     no scheduler) — proven by a sha256 snapshot before/after;
   - only SPECIFIC-entry pointers are checked: a generic `@VAULT@`-root reference (no
@@ -112,6 +115,42 @@ def main():
         r = run(skills, vault)
         check("generic @VAULT@ reference is not matched (clean, exit 0)",
               r.stdout.strip() == "" and r.returncode == 0, "%d / %s" % (r.returncode, r.stdout))
+
+        # scope: a non-deployed sibling under a skill dir is NOT a surface the installer renders
+        # vault references into, so its references are out of scope — never scanned, never flagged.
+        # A vendor-divergence golden snapshot and a practice README, each pointing at a MISSING
+        # entry, leave a clean tree clean (exit 0). This is the exact false-positive class the
+        # contract disowns: coverage is the deployed surfaces only, not the whole tree.
+        write(os.path.join(skills, "practice", "alpha", "vendor-divergence"),
+              "snapshot ... load `%s`.\n" % (REF % "snapshot-only-missing"))
+        write(os.path.join(skills, "practice", "README.md"),
+              "Example: a body may load `%s`.\n" % (REF % "readme-example-missing"))
+        r = run(skills, vault)
+        check("non-deployed vendor-divergence reference is out of scope (not reported)",
+              "snapshot-only-missing" not in r.stdout, r.stdout)
+        check("non-deployed practice README reference is out of scope (not reported)",
+              "readme-example-missing" not in r.stdout, r.stdout)
+        check("non-deployed danglers do not flip a clean tree (exit 0)",
+              r.stdout.strip() == "" and r.returncode == 0, "%d / %s" % (r.returncode, r.stdout))
+
+        # family skills deploy byte-identical (every file), so a reference anywhere under a
+        # metacognition-* skill dir IS covered — a references/*.md, not just its SKILL.md.
+        write(os.path.join(skills, "metacognition-demo", "references", "x.md"),
+              "see `%s`.\n" % (REF % "family-missing"))
+        r = run(skills, vault)
+        check("family skill file (metacognition-*/**) is scanned and its dangler reported",
+              "metacognition-demo/references/x.md: context-engineering/knowledge/family-missing.md" in r.stdout, r.stdout)
+        check("family dangler flips the run nonzero", r.returncode == 1, r.returncode)
+        make_entry(vault, "context-engineering", "family-missing")  # resolve, back to clean
+
+        # a shared-layout practice skill (one <name>/SKILL.md, no provider subdir) is also a
+        # deployed source and is scanned (the installer's shared layout, mirrored).
+        write(os.path.join(skills, "practice", "shared-skill", "SKILL.md"),
+              "load `%s`.\n" % (REF % "shared-missing"))
+        r = run(skills, vault)
+        check("shared-layout practice SKILL.md is scanned",
+              "practice/shared-skill/SKILL.md: context-engineering/knowledge/shared-missing.md" in r.stdout, r.stdout)
+        make_entry(vault, "context-engineering", "shared-missing")  # resolve, back to clean
 
         # the same (consumer, target) edge twice in one file is ONE reference
         write(os.path.join(skills, "practice", "dupe", "claude", "SKILL.md"),
