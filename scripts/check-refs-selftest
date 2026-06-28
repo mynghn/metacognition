@@ -1,0 +1,187 @@
+#!/usr/bin/env python3
+"""check-refs-selftest — behavioral tests for the consumer->vault reference check.
+
+Each test pins a property check-refs must hold (run after any change to check-refs). Tests drive
+a throwaway scan tree + vault via --scan-root / --vault, so nothing touches the real repo or vault:
+  - a baked specific-entry reference whose target entry is MISSING is reported as
+    `<consumer>: <topic>/knowledge/<slug>.md`, exit nonzero; a resolving one is not reported;
+  - when every referenced target exists, nothing is reported, exit 0;
+  - complete-by-construction: a NEW deployed consumer (a practice SKILL.md, a family-skill file)
+    is covered with no registration step, and EVERY dangler in one run is reported, not just first;
+  - coverage is the DEPLOYED surfaces only: a non-deployed sibling under a skill dir (a
+    vendor-divergence golden snapshot, a README, an un-baked agents.md) is out of scope and never
+    flagged, while every file under a metacognition-* family skill IS scanned;
+  - read-only: a run leaves the scanned tree AND the vault byte-for-byte unchanged (no writes,
+    no scheduler) — proven by a sha256 snapshot before/after;
+  - only SPECIFIC-entry pointers are checked: a generic `@VAULT@`-root reference (no
+    `/knowledge/<slug>.md` tail) is never matched and never dangles;
+  - the same (consumer, target) edge named twice in one file is ONE reference (one line);
+  - a missing vault or scan root is a clean error (exit 2, no traceback).
+"""
+import hashlib
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CR = os.path.join(SCRIPT_DIR, "check-refs")
+REF = "@VAULT@/context-engineering/knowledge/%s.md"
+_checks = []
+
+
+def check(name, ok, detail=""):
+    _checks.append(bool(ok))
+    print("  %s %s%s" % ("PASS" if ok else "FAIL", name, ("  — " + str(detail)) if detail and not ok else ""))
+
+
+def run(scan_root, vault, *extra):
+    return subprocess.run([sys.executable, CR, "--scan-root", scan_root, "--vault", vault, *extra],
+                          capture_output=True, text=True)
+
+
+def write(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text)
+
+
+def consumer(skills, *parts):
+    """Write a skill source that grounds itself in one specific vault entry."""
+    write(os.path.join(skills, *parts[:-1]), "Ground it: load `%s`.\n" % (REF % parts[-1]))
+
+
+def make_entry(vault, topic, slug):
+    write(os.path.join(vault, topic, "knowledge", slug + ".md"), "# %s\n" % slug)
+
+
+def snapshot(root):
+    """(relpath -> sha256) for every file under root — a byte-level fingerprint of the tree."""
+    snap = {}
+    for dp, _dns, fns in os.walk(root):
+        for fn in fns:
+            p = os.path.join(dp, fn)
+            with open(p, "rb") as fh:
+                snap[os.path.relpath(p, root)] = hashlib.sha256(fh.read()).hexdigest()
+    return snap
+
+
+def main():
+    root = tempfile.mkdtemp(prefix="check-refs-selftest-")
+    try:
+        skills = os.path.join(root, "skills")
+        vault = os.path.join(root, "vault")
+
+        # one consumer -> a PRESENT entry, one consumer -> a MISSING entry
+        consumer(skills, "practice", "alpha", "claude", "SKILL.md", "present-one")
+        consumer(skills, "practice", "beta", "claude", "SKILL.md", "missing-one")
+        make_entry(vault, "context-engineering", "present-one")
+
+        # dangling reference reported as `<consumer>: <target>`, exit nonzero; resolving one silent
+        r = run(skills, vault)
+        check("dangling reference reported as consumer: target",
+              "practice/beta/claude/SKILL.md: context-engineering/knowledge/missing-one.md" in r.stdout, r.stdout)
+        check("dangling run exits nonzero", r.returncode == 1, r.returncode)
+        check("resolving reference is NOT reported", "present-one.md" not in r.stdout, r.stdout)
+
+        # every referenced target exists -> nothing reported, exit 0
+        make_entry(vault, "context-engineering", "missing-one")
+        r = run(skills, vault)
+        check("all references resolve: nothing reported", r.stdout.strip() == "", r.stdout)
+        check("all references resolve: exit 0", r.returncode == 0, r.returncode)
+
+        # complete-by-construction: a NEW consumer dropped under the scan root is covered with no
+        # registration step — its dangling reference surfaces immediately
+        consumer(skills, "practice", "gamma", "codex", "SKILL.md", "freshly-added")
+        r = run(skills, vault)
+        check("newly added consumer is covered with no registration",
+              "practice/gamma/codex/SKILL.md: context-engineering/knowledge/freshly-added.md" in r.stdout, r.stdout)
+        check("newly added dangler flips the run nonzero", r.returncode == 1, r.returncode)
+
+        # EVERY dangler reported, not just the first
+        consumer(skills, "practice", "delta", "claude", "SKILL.md", "also-missing")
+        r = run(skills, vault)
+        check("every dangler reported (not just the first)",
+              "freshly-added.md" in r.stdout and "also-missing.md" in r.stdout, r.stdout)
+
+        # specific-entry only: a generic @VAULT@-root reference (no /knowledge/<slug>.md tail) is
+        # never matched, so it never dangles. Resolve the two danglers so a (wrong) generic match
+        # would be the ONLY thing that could fail this run.
+        write(os.path.join(skills, "practice", "generic", "claude", "SKILL.md"),
+              "Resolve `@VAULT@`; run `git -C @VAULT@ status`; see @VAULT@/some-topic/INDEX.md.\n")
+        make_entry(vault, "context-engineering", "freshly-added")
+        make_entry(vault, "context-engineering", "also-missing")
+        r = run(skills, vault)
+        check("generic @VAULT@ reference is not matched (clean, exit 0)",
+              r.stdout.strip() == "" and r.returncode == 0, "%d / %s" % (r.returncode, r.stdout))
+
+        # scope: a non-deployed sibling under a skill dir is NOT a surface the installer renders
+        # vault references into, so its references are out of scope — never scanned, never flagged.
+        # A vendor-divergence golden snapshot and a practice README, each pointing at a MISSING
+        # entry, leave a clean tree clean (exit 0). This is the exact false-positive class the
+        # contract disowns: coverage is the deployed surfaces only, not the whole tree.
+        write(os.path.join(skills, "practice", "alpha", "vendor-divergence"),
+              "snapshot ... load `%s`.\n" % (REF % "snapshot-only-missing"))
+        write(os.path.join(skills, "practice", "README.md"),
+              "Example: a body may load `%s`.\n" % (REF % "readme-example-missing"))
+        r = run(skills, vault)
+        check("non-deployed vendor-divergence reference is out of scope (not reported)",
+              "snapshot-only-missing" not in r.stdout, r.stdout)
+        check("non-deployed practice README reference is out of scope (not reported)",
+              "readme-example-missing" not in r.stdout, r.stdout)
+        check("non-deployed danglers do not flip a clean tree (exit 0)",
+              r.stdout.strip() == "" and r.returncode == 0, "%d / %s" % (r.returncode, r.stdout))
+
+        # family skills deploy byte-identical (every file), so a reference anywhere under a
+        # metacognition-* skill dir IS covered — a references/*.md, not just its SKILL.md.
+        write(os.path.join(skills, "metacognition-demo", "references", "x.md"),
+              "see `%s`.\n" % (REF % "family-missing"))
+        r = run(skills, vault)
+        check("family skill file (metacognition-*/**) is scanned and its dangler reported",
+              "metacognition-demo/references/x.md: context-engineering/knowledge/family-missing.md" in r.stdout, r.stdout)
+        check("family dangler flips the run nonzero", r.returncode == 1, r.returncode)
+        make_entry(vault, "context-engineering", "family-missing")  # resolve, back to clean
+
+        # a shared-layout practice skill (one <name>/SKILL.md, no provider subdir) is also a
+        # deployed source and is scanned (the installer's shared layout, mirrored).
+        write(os.path.join(skills, "practice", "shared-skill", "SKILL.md"),
+              "load `%s`.\n" % (REF % "shared-missing"))
+        r = run(skills, vault)
+        check("shared-layout practice SKILL.md is scanned",
+              "practice/shared-skill/SKILL.md: context-engineering/knowledge/shared-missing.md" in r.stdout, r.stdout)
+        make_entry(vault, "context-engineering", "shared-missing")  # resolve, back to clean
+
+        # the same (consumer, target) edge twice in one file is ONE reference
+        write(os.path.join(skills, "practice", "dupe", "claude", "SKILL.md"),
+              "load `%s` ... and again `%s`.\n" % (REF % "twice-ref", REF % "twice-ref"))
+        r = run(skills, vault)
+        check("same edge twice in a file is one reference (one line)",
+              len([ln for ln in r.stdout.splitlines() if "twice-ref.md" in ln]) == 1, r.stdout)
+        check("summary counts the duplicated edge once (1 dangling)", "1 dangling" in r.stderr, r.stderr)
+
+        # read-only: the scanned tree AND the vault are byte-identical before and after a run
+        before = snapshot(root)
+        run(skills, vault)
+        after = snapshot(root)
+        check("run is read-only: tree byte-identical before/after", before == after,
+              "changed paths: %s" % (set(before) ^ set(after)))
+
+        # a missing vault / scan root is a clean error (exit 2, no traceback)
+        r = run(skills, os.path.join(root, "no-such-vault"))
+        check("missing vault: clean error exit 2, no traceback",
+              r.returncode == 2 and "vault not found" in r.stderr and "Traceback" not in r.stderr, r.stderr)
+        r = run(os.path.join(root, "no-such-scan-root"), vault)
+        check("missing scan root: clean error exit 2, no traceback",
+              r.returncode == 2 and "scan root not found" in r.stderr and "Traceback" not in r.stderr, r.stderr)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    passed = sum(1 for ok in _checks if ok)
+    total = len(_checks)
+    print("\n%s: %d/%d checks passed" % ("PASS" if passed == total else "FAIL", passed, total))
+    return 0 if passed == total else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

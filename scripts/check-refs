@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""check-refs — read-only integrity check for consumer->vault soft references.
+
+Some framework-deployed skills point at ONE specific vault entry "for the full
+reasoning" — a baked `@VAULT@/<topic>/knowledge/<slug>.md` pointer. That pointer
+is a SOFT reference: the skill's inline floor works with the vault absent, and a
+missing target degrades only the optional depth, never the skill's own output.
+Nothing else watches these pointers, so when an entry is renamed, retired, or
+re-homed, the pointer rots silently. This check is the sole external asserter of
+their resolution (see ARCHITECTURE.md "Load-bearing rules"): it reports a broken
+pointer but never makes a consumer fail at runtime.
+
+It scans the consumer SOURCES the installer actually deploys and bakes `@VAULT@`
+into — each practice skill's rendered `SKILL.md` body (a shared `<name>/SKILL.md`,
+or the per-provider `<name>/<provider>/SKILL.md`), and every file under a
+`metacognition-*` family skill (deployed byte-identical) — discovered the way the
+installer deploys them, so coverage tracks deployment, not the whole tree. A
+non-deployed source under `skills/` — a `vendor-divergence` golden snapshot, a
+README, a practice `agents.md` block (deployed un-baked, so a vault token in it
+never resolves) — is not a surface the framework renders vault references into;
+scanning it would re-introduce the false positives the contract does not own.
+Coverage stays complete by construction: a new practice skill or a new
+family-skill file is covered with no registration step, mirroring the installer's
+own discovery, so it cannot drift out of sync with what is deployed. Scanning the
+source is equivalent to scanning the deployed copy — the installer renders it
+byte-identical and bakes the same `<topic>/knowledge/<slug>.md` tail — so this is
+the earlier, repo-local, CI-able form of the check. Only specific-entry pointers
+are checked: a generic `@VAULT@`-root reference (no `/knowledge/<slug>.md` tail)
+does not name an entry and is intentionally not matched.
+
+Read-only and on-demand: it reads and reports, never writes any repository, and
+runs only when invoked — no scheduler. stdout carries one `<consumer>: <target>`
+line per dangling reference; stderr a one-line summary naming the scanned root
+(so a surface outside `skills/` is a visible extension point, not a silent gap).
+Exit is nonzero iff any reference dangles, 0 when every reference resolves, 2 on
+a usage error (missing vault or scan root).
+"""
+import argparse
+import os
+import re
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PROG = "check-refs"
+
+# @VAULT@/<topic>/knowledge/<slug>.md — <topic> a vault stem, <slug> the engine's
+# kebab entry-slug charset ([a-z0-9][a-z0-9-]*). The captured group is the vault-
+# relative target. A generic @VAULT@ root with no /knowledge/<slug>.md tail names no
+# entry, so it is deliberately outside this pattern (specific-entry pointers only).
+# The trailing guard keeps `.md` from partial-matching a longer suffix (e.g. `.mdx`).
+_REF_RE = re.compile(r"@VAULT@/([a-z0-9][a-z0-9-]*/knowledge/[a-z0-9][a-z0-9-]*\.md)(?![a-z0-9-])")
+
+
+def warn(msg):
+    sys.stderr.write("%s: %s\n" % (PROG, msg))
+
+
+def resolve_vault(explicit):
+    """Family-level vault resolution matching the engine's contract for the standard single-
+    vault deployment: --vault > $KB_VAULT > installer config > default. (The engine's per-sibling
+    $<PREFIX>_KB_VAULT escape hatch is not honored here — a whole-tree scan reads one vault.)"""
+    for cand in (explicit, os.environ.get("KB_VAULT")):
+        if cand and cand.strip():
+            return os.path.abspath(os.path.expanduser(cand.strip()))
+    conf = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
+                        "metacognition", "vault")
+    if os.path.isfile(conf):
+        val = open(conf, encoding="utf-8").read().strip()
+        if val:
+            return os.path.abspath(os.path.expanduser(val))
+    return os.path.expanduser("~/.local/share/metacognition-vault")
+
+
+def _consumer_label(path, scan_root):
+    """Display the offending consumer repo-relative (`skills/...`) for the default scan; fall
+    back to scan-root-relative when the scan root sits outside this repo (an ad-hoc --scan-root)."""
+    rel = os.path.relpath(path, ROOT)
+    return rel if not rel.startswith("..") else os.path.relpath(path, scan_root)
+
+
+def deployed_sources(skills_root):
+    """The consumer source files the installer renders + bakes @VAULT@ into, discovered the way it
+    deploys them (mirrors install's practice_sources / deploy_family_skill) so coverage tracks
+    DEPLOYMENT, not the whole tree. Two deployed kinds carry baked vault references:
+      - practice: each skill's resolved SKILL.md body — a shared `<name>/SKILL.md`, else the
+        per-provider `<name>/<provider>/SKILL.md` (a provider subdir holding a SKILL.md);
+      - family: every file under a `metacognition-*` skill dir (deployed byte-identical).
+    Deliberately excluded as NON-deployed (or un-baked) surfaces: the `vendor-divergence` golden
+    snapshot, READMEs, and the practice `agents.md` block (upserted without @VAULT@ baking). Both
+    kinds are complete by construction — a new practice skill / family-skill file is picked up with
+    no registration step. dot-entries (e.g. .DS_Store) are skipped, as the installer skips them."""
+    sources = []
+    practice = os.path.join(skills_root, "practice")
+    if os.path.isdir(practice):
+        for name in sorted(os.listdir(practice)):
+            sdir = os.path.join(practice, name)
+            if name.startswith(".") or not os.path.isdir(sdir):
+                continue
+            shared = os.path.join(sdir, "SKILL.md")
+            if os.path.isfile(shared):
+                sources.append(shared)  # shared layout: one body, byte-identical to every provider
+            else:
+                for prov in sorted(os.listdir(sdir)):  # per-vendor: one body per provider subdir
+                    skill_md = os.path.join(sdir, prov, "SKILL.md")
+                    if not prov.startswith(".") and os.path.isfile(skill_md):
+                        sources.append(skill_md)
+    for name in sorted(os.listdir(skills_root)):
+        fdir = os.path.join(skills_root, name)
+        if not name.startswith("metacognition-") or not os.path.isdir(fdir):
+            continue
+        for dirpath, dirnames, filenames in os.walk(fdir):
+            dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+            for fn in sorted(filenames):
+                if not fn.startswith("."):
+                    sources.append(os.path.join(dirpath, fn))
+    return sources
+
+
+def collect_refs(scan_root):
+    """Every distinct (consumer, vault-relative target) reference across the DEPLOYED sources under
+    scan_root, sorted. A reference is the (consumer file, target entry) EDGE: the same target named
+    twice in one file is one reference; the same target in two files is two. Pure read — an
+    unreadable/undecodable (e.g. binary) file is skipped, never failed."""
+    found = set()
+    for path in deployed_sources(scan_root):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+        except (OSError, UnicodeDecodeError):
+            continue
+        consumer = _consumer_label(path, scan_root)
+        for m in _REF_RE.finditer(text):
+            found.add((consumer, m.group(1)))
+    return sorted(found)
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(prog=PROG,
+                                description="Read-only consumer->vault reference-integrity check.")
+    p.add_argument("--vault", help="vault repo root (default: $KB_VAULT / installer config / standard)")
+    p.add_argument("--scan-root", default=os.path.join(ROOT, "skills"),
+                   help="root scanned for baked vault references (default: the repo's skills/)")
+    args = p.parse_args(argv)
+
+    if not os.path.isdir(args.scan_root):
+        warn("scan root not found: %s" % args.scan_root)
+        return 2
+    vault = resolve_vault(args.vault)
+    if not os.path.isdir(vault):
+        warn("vault not found: %s" % vault)
+        return 2
+
+    refs = collect_refs(args.scan_root)
+    dangling = [(c, t) for c, t in refs if not os.path.isfile(os.path.join(vault, t))]
+    for consumer, target in dangling:
+        sys.stdout.write("%s: %s\n" % (consumer, target))
+
+    scanned = os.path.relpath(args.scan_root, ROOT)
+    if scanned.startswith(".."):
+        scanned = args.scan_root
+    warn("scanned %d reference(s) across %d surface(s) under %s, %d dangling"
+         % (len(refs), len({c for c, _ in refs}), scanned, len(dangling)))
+    return 1 if dangling else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

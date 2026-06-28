@@ -20,6 +20,7 @@ SUITE_COMMANDS = (
     "scripts/maintenance-selftest",
     "scripts/health-check-selftest",
     "scripts/no-net-loss-selftest",
+    "scripts/check-refs-selftest",
     "./engine/selftest",
 )
 
@@ -35,6 +36,8 @@ RELEVANT_EXACT = {
     "scripts/health-check-selftest",
     "scripts/no-net-loss",
     "scripts/no-net-loss-selftest",
+    "scripts/check-refs",
+    "scripts/check-refs-selftest",
     "FAMILY.md",
     "SOURCES.md",
 }
