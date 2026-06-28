@@ -10,7 +10,7 @@ The vault has a rich *inbound* story — capture, refresh, heal, health-check, n
 
 ## Outcome
 
-The consumer→vault dependency becomes named and watched, without becoming rigid. The relationship is documented as a deliberate, *soft* contract: each consumer keeps a self-sufficient inline floor that works even with the vault absent, plus an optional pointer into a single canonical entry for depth. And the framework can report, on demand, when any such pointer no longer resolves.
+The consumer→vault dependency becomes named and watched, without becoming rigid. The relationship is documented as a deliberate, *soft* contract: each consumer keeps a self-sufficient inline floor — a runnable procedure in its own right — that survives its one referenced entry being renamed, retired, or re-homed as the vault evolves, plus an optional pointer into a single canonical entry for depth. And the framework can report, on demand, when any such pointer no longer resolves.
 
 User stories:
 

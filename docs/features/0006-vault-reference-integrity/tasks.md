@@ -37,7 +37,7 @@ Two independent tracks: **C** builds the reference-integrity check and surfaces 
 
 ## T: A1
 
-- **Goal**: Document the consumer→vault soft-reference contract as a load-bearing rule in `ARCHITECTURE.md` §"Load-bearing rules", naming the layered design (inline floor functional with the vault absent + local procedure + an optional soft pointer to one entry) and that the pointer is externally checked, never a hard import, per `Design#D-4-document-contract-in-architecture`. Records the intent of `Spec#C-2-soft-reference-integrity` in prose.
+- **Goal**: Document the consumer→vault soft-reference contract as a load-bearing rule in `ARCHITECTURE.md` §"Load-bearing rules", naming the layered design (inline floor that survives its referenced entry being renamed/retired/re-homed + local procedure + an optional soft pointer to one entry) and that the pointer is externally checked, never a hard import, per `Design#D-4-document-contract-in-architecture`. Records the intent of `Spec#C-2-soft-reference-integrity` in prose.
 - **Repo**: `metacognition` (`ARCHITECTURE.md`)
 - **Completion**:
   - (a) §"Load-bearing rules" carries the contract rule, sited beside the two-repo rationale (Requirements success signal — "where the two-repo rationale lives").
